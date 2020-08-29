@@ -300,17 +300,7 @@ class Msvcrt(api.ApiHandler):
         z = self.double_to_hex(z)
 
         return z
-
-    @apihook('strlen', argc=1)
-    def strlen(self, emu, argv, ctx={}):
-        '''
-        size_t strlen(  
-          const char *str  
-        );
-        '''
-        _str, = argv
-        return(len(self.read_string(_str)))    
-    
+      
     @apihook('strstr', argc=2, conv=e_arch.CALL_CONV_CDECL)
     def strstr(self, emu, argv, ctx={}):
         """
@@ -547,8 +537,39 @@ class Msvcrt(api.ApiHandler):
 
         self.write_string(s, dest)
         argv[1] = s
-        return len(s)
-
+        return dest
+    
+    @apihook('wcscpy', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def wcscpy(self, emu, argv, ctx={}):
+        """
+        wchar_t *wcscpy(
+            wchar_t *strDestination,
+            const wchar_t *strSource
+        );
+        """
+        dest, src = argv
+        ws = self.read_wide_string(src)
+        self.write_wide_string(ws, dest)
+        argv[1] = ws
+        return dest
+    
+    @apihook('strncpy', argc=3, conv=e_arch.CALL_CONV_CDECL)
+    def strncpy(self, emu, argv, ctx={}):
+        """
+        char * strncpy( 
+            char * destination, 
+            const char * source, 
+            size_t num 
+        );
+        """
+        dest, src, length = argv
+        s = self.read_string(src,max_chars=length)
+        if len(s) < length:
+            s += '\x00'*(length-len(s))
+        self.write_string(s, dest)
+        argv[1] = s
+        return dest
+    
     @apihook('memcpy', argc=3, conv=e_arch.CALL_CONV_CDECL)
     def memcpy(self, emu, argv, ctx={}):
         """
@@ -562,7 +583,21 @@ class Msvcrt(api.ApiHandler):
         data = self.mem_read(src, count)
         self.mem_write(dest, data)
         return dest
-
+    
+    @apihook('memmove', argc=3, conv=e_arch.CALL_CONV_CDECL)
+    def memmove(self, emu, argv, ctx={}):
+        """
+        void *memmove(
+            void *dest,
+            const void *src,
+            size_t count
+        );
+        """
+        dest, src, count = argv
+        data = self.mem_read(src, count)
+        self.mem_write(dest, data)
+        return dest
+    
     @apihook('_except_handler4_common', argc=6, conv=e_arch.CALL_CONV_CDECL)
     def _except_handler4_common(self, emu, argv, ctx={}):
         """
@@ -747,6 +782,23 @@ class Msvcrt(api.ApiHandler):
 
         return rv
 
+    @apihook('strcat', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def strcat(self, emu, argv, ctx={}):
+        '''
+        char *strcat(
+            char *strDestination,
+            const char *strSource
+        );
+        '''
+        _str1, _str2 = argv
+        s1 = self.read_mem_string(_str1, 1)
+        s2 = self.read_mem_string(_str2, 1)
+        argv[0] = s1
+        argv[1] = s2
+        new = (s1 + s2).encode('utf-8')
+        self.mem_write(_str1, new + b'\x00')
+        return _str1    
+    
     @apihook('wcslen', argc=1, conv=e_arch.CALL_CONV_CDECL)
     def wcslen(self, emu, argv, ctx={}):
         """
