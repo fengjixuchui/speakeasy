@@ -17,6 +17,7 @@ import speakeasy.common as common
 from speakeasy.errors import Win32EmuError
 
 from speakeasy.windows.sessman import SessionManager
+from speakeasy.windows.com import COM
 
 
 DLL_PROCESS_DETACH = 0
@@ -38,6 +39,7 @@ class Win32Emulator(WindowsEmulator):
         self.heap_allocs = []
         self.argv = argv
         self.sessman = SessionManager(config)
+        self.com = COM(config)
 
     def get_argv(self):
         """
@@ -57,6 +59,18 @@ class Win32Emulator(WindowsEmulator):
         elif self.command_line:
             out = shlex.split(self.command_line, posix=False)
         return out
+
+    def get_com_interface(self, name):
+        """
+        Retreive a COM interface by name
+        """
+        ci = self.com.get_interface(name, self.get_ptr_size())
+        if not ci:
+            raise Win32EmuError('Invalid COM interface: %s' % (name))
+
+        com_ptr = self.mem_map(self.sizeof(ci.iface), tag='emu.COM.%s' % (name))
+        ci.address = com_ptr
+        return ci
 
     def set_last_error(self, code):
         """
@@ -143,7 +157,7 @@ class Win32Emulator(WindowsEmulator):
             self.disasm_eng = cs.Cs(cs.CS_ARCH_X86, disasm_mode)
 
         if not data:
-            file_name = os.path.basename(path)
+            file_name = os.path.basename(path) + '.exe'
             mod_name = os.path.splitext(file_name)[0]
 
         else:
@@ -213,11 +227,22 @@ class Win32Emulator(WindowsEmulator):
             self.stop()
             raise Win32EmuError('Module not found')
 
+        # Check is any TLS callbacks exist, these run before the module's entry point
+        tls = module.get_tls_callbacks()
+        for i, cb_addr in enumerate(tls):
+            base = module.get_base()
+            if base < cb_addr < base + module.get_image_size():
+                run = Run()
+                run.start_addr = cb_addr
+                run.type = 'tls_callback_%d' % (i)
+                run.args = [base, DLL_PROCESS_ATTACH, 0]
+                self.add_run(run)
+
+        # Queue up the module's main entry point
         ep = module.base + module.ep
 
         run = Run()
         run.start_addr = ep
-        run.instr_cnt = 0
 
         main_exe = None
         if not module.is_exe():
@@ -269,6 +294,9 @@ class Win32Emulator(WindowsEmulator):
             p = objman.Process(self, path=module.get_emu_path(), base=module.base,
                                pe=module, cmdline=self.command_line)
             self.curr_process = p
+            mm = self.get_address_map(module.base)
+            if mm:
+                mm.process = self.curr_process
 
         t = objman.Thread(self,
                           stack_base=self.stack_base,
@@ -297,8 +325,14 @@ class Win32Emulator(WindowsEmulator):
         """
         Load position independent code (i.e. shellcode) to prepare for emulation
         """
-        self.arch = arch
         sc_hash = None
+
+        if arch == 'x86':
+            arch = _arch.ARCH_X86
+        elif arch in ('x64', 'amd64'):
+            arch = _arch.ARCH_AMD64
+
+        self.arch = arch
 
         if data:
             sc_hash = hashlib.sha256()
@@ -350,6 +384,8 @@ class Win32Emulator(WindowsEmulator):
                 self.profiler.strings['ansi'] = self.get_ansi_strings(sc)
                 self.profiler.strings['unicode'] = self.get_unicode_strings(sc)
 
+        self.setup()
+
         return sc_addr
 
     def run_shellcode(self, sc_addr, offset=0):
@@ -365,8 +401,6 @@ class Win32Emulator(WindowsEmulator):
 
         if not target:
             raise Win32EmuError('Invalid shellcode address')
-
-        self.setup()
 
         stack_commit = 0x4000
 
@@ -431,6 +465,12 @@ class Win32Emulator(WindowsEmulator):
         peb.object.ImageBaseAddress = proc.base
         peb.write_back()
         return peb
+
+    def set_unhandled_exception_handler(self, handler_addr):
+        """
+        Establish a handler for unhandled exceptions that occur during emulation
+        """
+        self.unhandled_exception_filter = handler_addr
 
     def setup(self, stack_commit=0):
 

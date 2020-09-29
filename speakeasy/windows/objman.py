@@ -411,7 +411,8 @@ class Thread(KernelObject):
         self.teb = None
         self.seh = SEH()
         self.tls = []
-        self.ctx = None
+        self.message_queue = []
+        self.ctx = self.emu.get_thread_context()
         self.fls = []
         self.suspend_count = 0
         self.token = Token(self.emu)
@@ -421,6 +422,12 @@ class Thread(KernelObject):
 
         self.write_back()
         self.process = None
+
+    def queue_message(self, msg):
+        """
+        Add a GUI message to the thread's message queue
+        """
+        self.message_queue.append(msg)
 
     def get_seh(self):
         return self.seh
@@ -835,6 +842,28 @@ class ObjectManager(object):
         obj.ref_cnt += 1
         return obj
 
+    def remove_object(self, obj):
+        """
+        Remove an object from the object manager
+        """
+        addr = None
+        for a, o in self.objects.items():
+            if o == obj:
+                addr = a
+                break
+        if addr:
+            self.objects.pop(addr)
+
+    def dec_ref(self, obj):
+        """
+        Dereferece an object and remove it from the object manager when its reference count is 0
+        """
+        if hasattr(obj, 'ref_cnt'):
+            obj.ref_cnt -= 1
+            if obj.ref_cnt <= 0:
+                self.remove_object(obj)
+            return obj.ref_cnt
+
     def get_handle(self, obj):
         tmp = KernelObject.curr_handle
         KernelObject.curr_handle += 4
@@ -858,7 +887,8 @@ class ObjectManager(object):
 
         name = name.rstrip('\\')
         for a, o in self.objects.items():
-
+            if not o.name:
+                continue
             if o.name.lower() == name.lower():
                 return o
         if check_symlinks:

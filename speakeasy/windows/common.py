@@ -32,6 +32,8 @@ GDT_FLAGS.Ring0 = 0
 IMPORT_HOOK_ADDR = 0xFEEDFACE
 DEFAULT_LOAD_ADDR = 0x40000
 
+PAGE_SIZE = 0x1000
+
 EMU_RESERVED = 0xfeedf000
 EMU_RESERVE_SIZE = 0x4000
 DYM_IMP_RESERVE = EMU_RESERVED + 0x1000
@@ -42,7 +44,8 @@ EMU_RESERVED_END = (EMU_RESERVED + EMU_RESERVE_SIZE)
 EMU_RETURN_ADDR = EMU_RESERVED
 EXIT_RETURN_ADDR = EMU_RETURN_ADDR + 1
 SEH_RETURN_ADDR = EMU_RETURN_ADDR + 4
-IMPORT_HOOK_ADDR = EMU_RETURN_ADDR + 8
+API_CALLBACK_HANDLER_ADDR = EMU_RETURN_ADDR + 8
+IMPORT_HOOK_ADDR = EMU_RETURN_ADDR + 12
 
 # Common blank DOS header
 DOS_HEADER = b'MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00\xb8\x00\x00\x00' \
@@ -117,6 +120,24 @@ class PeFile(pefile.PE):
             self.ptr_size = 8
 
         self._patch_imports()
+
+    def get_tls_callbacks(self):
+        """
+        Get the TLS callbacks for a PE (if any)
+        """
+        max_tls_callbacks = 100
+        callbacks = []
+        if hasattr(self, 'DIRECTORY_ENTRY_TLS'):
+            rva = (self.DIRECTORY_ENTRY_TLS.struct.AddressOfCallBacks -
+                   self.OPTIONAL_HEADER.ImageBase)
+
+            for i in range(max_tls_callbacks):
+                ptr = self.get_data(rva + self.ptr_size * i, self.ptr_size)
+                ptr = int.from_bytes(ptr, 'little')
+                if ptr == 0:
+                    break
+                callbacks.append(ptr)
+        return callbacks
 
     def get_emu_path(self):
         """
@@ -315,8 +336,8 @@ class DecoyModule(PeFile):
         self.is_mapped = False
         self.data = b''
 
-    def get_memory_mapped_image(self, max_virtual_address=0x10000000):
-        mmi = super(DecoyModule, self).get_memory_mapped_image(max_virtual_address)
+    def get_memory_mapped_image(self, max_virtual_address=0x10000000, base=None):
+        mmi = super(DecoyModule, self).get_memory_mapped_image(max_virtual_address, base)
         if len(mmi) < len(self.__data__):
             return self.__data__
         return mmi
@@ -397,7 +418,8 @@ class JitPeFile(object):
         '''
         Update the size of the image within the optional header
         '''
-        self.basepe.OPTIONAL_HEADER.SizeOfImage = len(self.basepe.get_memory_mapped_image())
+        self.basepe.OPTIONAL_HEADER.SizeOfImage = (len(self.basepe.get_memory_mapped_image()) +
+                                                   PAGE_SIZE)
 
     def add_section(self, name, chars=0x40000040):
         '''

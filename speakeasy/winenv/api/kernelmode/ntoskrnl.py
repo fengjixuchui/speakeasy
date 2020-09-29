@@ -8,6 +8,7 @@ import lznt1
 import speakeasy.winenv.arch as _arch
 import speakeasy.winenv.defs.nt.ddk as ddk
 import speakeasy.winenv.defs.registry.reg as regdefs
+import speakeasy.winenv.defs.windows.windows as windefs
 import speakeasy.winenv.defs.nt.ntoskrnl as ntos
 from speakeasy.errors import ApiEmuError
 from speakeasy.winenv.api import api
@@ -1292,6 +1293,16 @@ class Ntoskrnl(api.ApiHandler):
             OUT PULONG OldAccessProtection
             )
         """
+        hnd, base, byte_len, new_prot, old_prot = argv
+
+        if base:
+            addr = self.mem_read(base, emu.get_ptr_size())
+            addr = int.from_bytes(addr, 'little')
+            argv[1] = addr
+        if byte_len:
+            size = self.mem_read(byte_len, emu.get_ptr_size())
+            size = int.from_bytes(size, 'little')
+            argv[2] = size
         rv = ddk.STATUS_SUCCESS
         return rv
 
@@ -1323,7 +1334,6 @@ class Ntoskrnl(api.ApiHandler):
             self.mem_write(lpBaseAddress, data)
             if lpNumberOfBytesWritten:
                 bw = (len(data)).to_bytes(self.get_ptr_size(), 'little')
-                print(data)
                 self.mem_write(lpNumberOfBytesWritten, bw)
         else:
             rv = ddk.STATUS_INVALID_PARAMETER
@@ -1356,6 +1366,9 @@ class Ntoskrnl(api.ApiHandler):
         size = int.from_bytes(self.mem_read(RegionSize,
                                             self.get_ptr_size()), 'little')
 
+        base = self.mem_read(BaseAddress, emu.get_ptr_size())
+        base = int.from_bytes(base, 'little')
+        argv[1] = '0x%x->0x%x' % (BaseAddress, base)
         base = self.mem_alloc(size, tag='api.virtalloc.%s' % obj.image, process=obj)
 
         emu._set_dyn_code_hook(base, size)
@@ -2007,6 +2020,22 @@ class Ntoskrnl(api.ApiHandler):
             );
         """
         return None
+
+    @apihook('RtlGetCompressionWorkSpaceSize', argc=3)
+    def RtlGetCompressionWorkSpaceSize(self, emu, argv, ctx={}):
+        """
+        NT_RTL_COMPRESS_API NTSTATUS RtlGetCompressionWorkSpaceSize(
+            USHORT CompressionFormatAndEngine,
+            PULONG CompressBufferWorkSpaceSize,
+            PULONG CompressFragmentWorkSpaceSize
+        );
+        """
+        engine, buffer_workspace, frag_workspace = argv
+        if buffer_workspace:
+            self.mem_write(buffer_workspace, 0x1000.to_bytes(4, 'little'))
+        if frag_workspace:
+            self.mem_write(frag_workspace, 0x1000.to_bytes(4, 'little'))
+        return ddk.STATUS_SUCCESS
 
     @apihook('RtlDecompressBuffer', argc=6)
     def RtlDecompressBuffer(self, emu, argv, ctx={}):
@@ -2888,6 +2917,8 @@ class Ntoskrnl(api.ApiHandler):
                 fname = fname.replace('.', '_')
                 mm.update_tag('%s.%s.0x%x' % (tag_prefix, fname, buf))
                 self.mem_write(buf, data)
+                argv[2] = buf
+                argv[3] = size
             elif not pref_address:
                 if bytes_to_map == 0:
                     bytes_to_map = sect.size
@@ -2896,6 +2927,8 @@ class Ntoskrnl(api.ApiHandler):
                                      process=proc_obj)
                 mm = emu.get_address_map(buf)
                 mm.update_tag('%s.0x%x' % (tag_prefix, buf))
+                argv[2] = buf
+                argv[3] = size
                 sect.add_view(buf, full_offset, size, access)
             else:
                 buf = pref_address
@@ -2925,6 +2958,47 @@ class Ntoskrnl(api.ApiHandler):
         block = self.heap_alloc(size, heap='RtlAllocateHeap')
 
         return block
+
+    @apihook('ZwGetContextThread', argc=2)
+    def ZwGetContextThread(self, emu, argv, ctx={}):
+        '''
+        BOOL ZwGetContextThread(
+            HANDLE    hThread,
+            LPCONTEXT lpContext
+        );
+        '''
+        hThread, lpContext = argv
+
+        obj = self.get_object_from_handle(hThread)
+        if not obj:
+            return False
+
+        context = obj.get_context()
+
+        self.mem_write(lpContext, context.get_bytes())
+
+        return True
+
+    @apihook('ZwSetContextThread', argc=2)
+    def ZwSetContextThread(self, emu, argv, ctx={}):
+        '''
+        BOOL ZwSetContextThread(
+            HANDLE    hThread,
+            LPCONTEXT lpContext
+        );
+        '''
+        hThread, lpContext = argv
+
+        obj = self.get_object_from_handle(hThread)
+        if not obj:
+            return False
+
+        context = windefs.CONTEXT(emu.get_ptr_size())
+        if lpContext:
+            _context = self.mem_cast(context, lpContext)
+            obj.set_context(_context)
+
+        return True
 
     @apihook('RtlFreeHeap', argc=3)
     def RtlFreeHeap(self, emu, argv, ctx={}):

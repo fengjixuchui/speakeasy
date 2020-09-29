@@ -4,6 +4,7 @@ import speakeasy.winenv.arch as _arch
 from speakeasy.profiler import Run
 from speakeasy.struct import EmuStruct
 from speakeasy.errors import ApiEmuError
+import speakeasy.windows.common as winemu
 
 import speakeasy.winenv.defs.nt.ntoskrnl as ntos
 
@@ -295,8 +296,9 @@ class ApiHandler(object):
 
         return self.emu.mem_write(addr, data)
 
-    def create_thread(self, addr, ctx, hproc, thread_type='thread'):
-        return self.emu.create_thread(addr, ctx, hproc, thread_type=thread_type)
+    def create_thread(self, addr, ctx, hproc, thread_type='thread', is_suspended=False):
+        return self.emu.create_thread(addr, ctx, hproc, thread_type=thread_type,
+                                      is_suspended=is_suspended)
 
     def get_object_from_id(self, id):
         return self.emu.get_object_from_id(id)
@@ -357,6 +359,25 @@ class ApiHandler(object):
             args.append(arg)
             ptr += ptrsize
         return args
+
+    def setup_callback(self, func, args, caller_argv=[]):
+        """
+        For APIs that call functions, we will setup the stack to make this flow
+        naturally.
+        """
+
+        run = self.emu.get_current_run()
+
+        if not len(run.api_callbacks):
+            # Get the original return address
+            ret = self.emu.get_ret_address()
+            sp = self.emu.get_stack_ptr()
+
+            self.emu.set_func_args(sp, winemu.API_CALLBACK_HANDLER_ADDR, *args)
+            self.emu.set_pc(func)
+            run.api_callbacks.append((ret, func, caller_argv))
+        else:
+            run.api_callbacks.append((None, func, args))
 
     def do_str_format(self, string, argv):
         """

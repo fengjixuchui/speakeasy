@@ -16,6 +16,7 @@ from speakeasy.windows.regman import RegistryManager
 from speakeasy.windows.fileman import FileManager
 from speakeasy.windows.cryptman import CryptoManager
 from speakeasy.windows.netman import NetworkManager
+from speakeasy.windows.hammer import ApiHammer
 
 import speakeasy.winenv.defs.nt.ddk as ddk
 import speakeasy.winenv.defs.windows.windows as windef
@@ -61,6 +62,7 @@ class WindowsEmulator(BinaryEmulator):
         self.tmp_maps = []
         self.impdata_queue = []
         self.run_queue = []
+        self.suspended_runs = []
         self.cd = ''
         self.emu_hooks_set = True
         self.api = None
@@ -83,6 +85,7 @@ class WindowsEmulator(BinaryEmulator):
         self.curr_thread = None
         self.curr_exception_code = 0
         self.prev_pc = 0
+        self.unhandled_exception_filter = 0
 
         self.fs_addr = 0
         self.gs_addr = 0
@@ -97,6 +100,7 @@ class WindowsEmulator(BinaryEmulator):
         self.fileman = FileManager(self.get_filesystem_config())
         self.netman = NetworkManager(config=self.get_network_config())
         self.cryptman = CryptoManager()
+        self.hammer = ApiHammer(self)
 
     def _parse_config(self, config):
         """
@@ -719,6 +723,9 @@ class WindowsEmulator(BinaryEmulator):
     def get_env(self):
         return self.env
 
+    def set_env(self, var, val):
+        return self.env.update({var.lower(): val})
+
     def get_os_version(self):
         return self.osversion
 
@@ -759,7 +766,7 @@ class WindowsEmulator(BinaryEmulator):
     def new_object(self, otype):
         return self.om.new_object(otype)
 
-    def create_process(self, path='', cmdline=''):
+    def create_process(self, path='', cmdline='', image=None):
         """
         Create a process object that will exist in the emulator
         """
@@ -782,14 +789,24 @@ class WindowsEmulator(BinaryEmulator):
         mod_name = os.path.splitext(mod_name)[0]
 
         decoy_mod = self.init_module(name=mod_name, emu_path=p.path)
+        size = decoy_mod.image_size
+        if size < self.page_size:
+            size = self.page_size * 2
+        self.map_decoy(decoy_mod)
+
         p.pe = decoy_mod
         p.name = mod_name
         self.alloc_peb(p)
 
+        if self.get_arch() == _arch.ARCH_X86:
+            t.ctx.Eax = decoy_mod.base + decoy_mod.ep
+            t.ctx.Eip = t.ctx.Eax
+            t.ctx.Ebx = p.get_peb().address
+
         self.processes.append(p)
         return p
 
-    def create_thread(self, addr, ctx, proc_obj, thread_type='thread'):
+    def create_thread(self, addr, ctx, proc_obj, thread_type='thread', is_suspended=False):
         """
         Create a thread object that will exist in the emulator
         """
@@ -797,6 +814,7 @@ class WindowsEmulator(BinaryEmulator):
             return 0, None
 
         thread = self.om.new_object(objman.Thread)
+        thread.process = proc_obj
         hnd = self.om.get_handle(thread)
 
         run = Run()
@@ -807,10 +825,24 @@ class WindowsEmulator(BinaryEmulator):
         run.process_context = proc_obj
         run.thread = thread
 
-        self.run_queue.append(run)
+        if not is_suspended:
+            self.run_queue.append(run)
+        else:
+            self.suspended_runs.append(run)
 
         # Returns handle
         return hnd, thread
+
+    def resume_thread(self, thread):
+        """
+        Resume a previously suspended thread
+        """
+        for r in self.suspended_runs:
+            if r.thread == thread:
+                _run = self.suspended_runs.pop(self.suspended_runs.index(r))
+                self.run_queue.append(_run)
+                return True
+        return False
 
     def get_dyn_imports(self):
         return self.dyn_imps
@@ -909,8 +941,9 @@ class WindowsEmulator(BinaryEmulator):
                 self._unset_emu_hooks()
                 return True
 
+        # Are there any SEH handlers registered?
         if self.dispatch_handlers:
-            rv = self.dispatch_seh(ddk.STATUS_ACCESS_VIOLATION)
+            rv = self.dispatch_seh(ddk.STATUS_ACCESS_VIOLATION, address)
             if rv:
                 return True
 
@@ -927,9 +960,10 @@ class WindowsEmulator(BinaryEmulator):
         """
         Collect emulator state information in the event of an error
         """
+        run = self.get_current_run()
         pc = self.get_pc()
         error = {}
-        self.log_error('Caught error: %s' % (desc))
+        self.log_error('%s: Caught error: %s' % (run.type, desc))
         error['type'] = desc
         error['pc'] = hex(pc)
         error['address'] = hex(address)
@@ -972,6 +1006,10 @@ class WindowsEmulator(BinaryEmulator):
         # Funnel CRTs into a single handler
         if (dll.lower().startswith(('api-ms-win-crt', 'vcruntime', 'ucrtbased'))):
             alt_imp_dll = 'msvcrt'
+
+        # Redirect windows sockets 1.0 to windows sockets 2.0
+        if (dll.lower().startswith('winsock') or dll.lower().startswith('wsock32')):
+            alt_imp_dll = 'ws2_32'
 
         # Bridge ntdll funcs to ntoskrnl if supported
         elif dll.lower().startswith('ntdll'):
@@ -1033,6 +1071,7 @@ class WindowsEmulator(BinaryEmulator):
         Forward imported functions to the corresponding handler (if any).
         """
         imp_api = '%s.%s' % (dll, name)
+        oret = self.get_ret_address()
         mod, func_attrs = self.api.get_export_func_handler(dll, name)
         if not func_attrs:
             mod, func_attrs = self.normalize_import_miss(dll, name)
@@ -1047,6 +1086,7 @@ class WindowsEmulator(BinaryEmulator):
             imp_api = '%s.%s' % (dll, name)
             default_ctx = {'func_name': imp_api}
 
+            self.hammer.handle_import_func(imp_api, conv, argc)
             hook = self.get_api_hook(dll, name)
             if hook:
                 from types import MethodType
@@ -1068,14 +1108,14 @@ class WindowsEmulator(BinaryEmulator):
             mm = self.get_address_map(ret)
 
             # Is this function being called from a dynamcially allocated memory segment?
-            if 'virtualalloc' in mm.get_tag().lower():
+            if mm and 'virtualalloc' in mm.get_tag().lower():
                 self._dynamic_code_cb(self, ret, 0, {})
 
             # Log the API args and return value
-            self.log_api(ret, imp_api, rv, argv)
+            self.log_api(oret, imp_api, rv, argv)
 
-            if not self.run_complete:
-                self.do_call_return(ret, argc, rv, conv=conv)
+            if not self.run_complete and ret == oret:
+                self.do_call_return(argc, ret, rv, conv=conv)
 
         else:
             # See if a user defined a hook for this unsupported function
@@ -1090,7 +1130,7 @@ class WindowsEmulator(BinaryEmulator):
                 rv = hook.cb(self, imp_api, None, argv)
                 ret = self.get_ret_address()
                 self.log_api(ret, imp_api, rv, argv)
-                self.do_call_return(ret, hook.argc, rv, conv=hook.call_conv)
+                self.do_call_return(hook.argc, ret, rv, conv=hook.call_conv)
                 return
 
             run = self.get_current_run()
@@ -1114,7 +1154,6 @@ class WindowsEmulator(BinaryEmulator):
         High level function used to catch all invalid memory accesses that occur during
         emulation
         """
-
         try:
             access = self.emu_eng.mem_access.get(access)
             self.prev_pc = self.get_pc()
@@ -1129,6 +1168,13 @@ class WindowsEmulator(BinaryEmulator):
                 if address == winemu.SEH_RETURN_ADDR:
                     self.continue_seh()
                     self._unset_emu_hooks()
+                    return True
+                elif address == winemu.API_CALLBACK_HANDLER_ADDR:
+                    run = self.get_current_run()
+                    if run.api_callbacks:
+                        pc, orig_func, args = run.api_callbacks.pop(0)
+                        self.do_call_return(len(args), pc)
+                        self._unset_emu_hooks()
                     return True
                 return self._handle_invalid_fetch(emu, address, size,
                                                   value, ctx)
@@ -1307,7 +1353,7 @@ class WindowsEmulator(BinaryEmulator):
             return True
 
         if self.dispatch_handlers:
-            rv = self.dispatch_seh(ddk.STATUS_ACCESS_VIOLATION)
+            rv = self.dispatch_seh(ddk.STATUS_ACCESS_VIOLATION, address)
             if rv:
                 return True
         fakeout = address & 0xFFFFFFFFFFFFF000
@@ -1347,7 +1393,7 @@ class WindowsEmulator(BinaryEmulator):
         Called when non-writable address is written to
         """
         if self.dispatch_handlers:
-            rv = self.dispatch_seh(ddk.STATUS_ACCESS_VIOLATION)
+            rv = self.dispatch_seh(ddk.STATUS_ACCESS_VIOLATION, address)
             if rv:
                 return True
 
@@ -1366,7 +1412,9 @@ class WindowsEmulator(BinaryEmulator):
         Hook called before every emulated instruction. Ideally we want to
         stay out of this hook as much as possible for speed considerations.
         """
-
+        if self.debug:
+            x = self.get_disasm(addr, size)[2]
+            print('0x%x: %s, edi=0x%x : esi=0x%x : ebp=0x%x : eax=0x%x' % (addr, x, self.reg_read('edi'), self.reg_read('esi'), self.reg_read('ebp'), self.reg_read('eax'))) # noqa
         try:
             if self.curr_exception_code != 0:
                 self.dispatch_seh(self.curr_exception_code)
@@ -1681,10 +1729,11 @@ class WindowsEmulator(BinaryEmulator):
                                    perms=common.PERM_MEM_RW)
 
             decoy.is_mapped = True
-            img = decoy.get_memory_mapped_image()
+            img = decoy.get_memory_mapped_image(base=mem)
             self.mem_write(mem, bytes(img))
             if not self.mem_tracing_enabled:
                 self.add_code_hook(cb=self._module_access_hook, begin=mem, end=mem+len(img))
+            decoy.base = mem
             return True
 
     def get_thread_context(self, thread=None):
@@ -1714,7 +1763,7 @@ class WindowsEmulator(BinaryEmulator):
                 ctx.SegGs = self.reg_read(_arch.X86_REG_GS)
                 ctx.SegEs = self.reg_read(_arch.X86_REG_ES)
             elif self.get_arch() == _arch.ARCH_AMD64:
-                raise NotImplementedError()
+                ctx = self.wintypes.CONTEXT64(self.get_ptr_size())
         return ctx
 
     def load_thread_context(self, ctx, thread=None):
@@ -1883,9 +1932,40 @@ class WindowsEmulator(BinaryEmulator):
 
         self.run_complete = True
 
-    def dispatch_seh(self, except_code):
+    def dispatch_seh(self, except_code, faulting_address=None):
+        rv = False
         if self.get_arch() == _arch.ARCH_X86:
-            return self._dispatch_seh_x86(except_code)
+            rv = self._dispatch_seh_x86(except_code)
+        if not rv and self.unhandled_exception_filter:
+            # Create the _EXCEPTION_RECORD
+            record = self.wintypes.EXCEPTION_RECORD(self.get_ptr_size())
+            record.ExceptionCode = except_code
+            record.ExceptionFlags = 0
+            record.ExceptionAddress = self.get_pc()
+            record.NumberParameters = 0
+
+            exp_ptrs = self.wintypes.EXCEPTION_POINTERS(self.get_ptr_size())
+            p_exp_ptrs = self.mem_map(exp_ptrs.sizeof(), tag='emu.struct.EXCEPTION_POINTERS')
+            prec = self.mem_map(record.sizeof(), tag='emu.struct.EXCEPTION_RECORD')
+            pctx = self.mem_map(record.sizeof(), tag='emu.struct.EXCEPTION_CONTEXT')
+
+            exp_ptrs.ExceptionRecord = prec
+            exp_ptrs.ContextRecord = pctx
+
+            self.mem_write(p_exp_ptrs, exp_ptrs.get_bytes())
+            self.mem_write(prec, record.get_bytes())
+
+            sp = self.get_stack_ptr()
+            args = [p_exp_ptrs]
+            self.set_func_args(sp, winemu.EMU_RETURN_ADDR, *args)
+            self.set_pc(self.unhandled_exception_filter)
+            self.unhandled_exception_filter = 0
+            if faulting_address:
+                fakeout = faulting_address & 0xFFFFFFFFFFFFF000
+                self.mem_map(self.page_size, base=fakeout)
+                self.tmp_maps.append((fakeout, self.page_size))
+            rv = True
+        return rv
 
     def continue_seh(self):
         if self.get_arch() == _arch.ARCH_X86:
@@ -1895,16 +1975,22 @@ class WindowsEmulator(BinaryEmulator):
         """
         Create a kernel event object
         """
-        evt = objman.Event(self)
+        evt = self.new_object(objman.Event)
         evt.name = name
         hnd = self.om.get_handle(evt)
         return hnd, evt
+
+    def dec_ref(self, obj):
+        """
+        Dereference an object
+        """
+        return self.om.dec_ref(obj)
 
     def create_mutant(self, name=''):
         """
         Create a kernel mutant object
         """
-        mtx = objman.Mutant(self)
+        mtx = self.new_object(objman.Mutant)
         mtx.name = name
         hnd = self.om.get_handle(mtx)
         return hnd, mtx

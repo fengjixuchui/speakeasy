@@ -95,6 +95,8 @@ class Kernel32(api.ApiHandler):
         ret = name
         if (name.lower().startswith('api-ms-win-crt') or name.lower().startswith('vcruntime')):
             ret = 'msvcrt'
+        if (name.lower().startswith('api-ms-win-core')):
+            ret = 'kernel32'
         return ret
 
     def normalize_res_identifier(self, emu, cw, val):
@@ -114,6 +116,10 @@ class Kernel32(api.ApiHandler):
     def find_resource(self, pe, name, type_):
         # find type
         resource_type = None
+
+        if not hasattr(pe, 'DIRECTORY_ENTRY_RESOURCE'):
+            return None
+
         for restype in pe.DIRECTORY_ENTRY_RESOURCE.entries:
             if type(type_) is str and restype.name is not None:
                 if type_ == restype.name.decode('utf8'):
@@ -140,6 +146,13 @@ class Kernel32(api.ApiHandler):
 
         return None
 
+    @apihook('GetThreadLocale', argc=0)
+    def GetThreadLocale(self, emu, argv, ctx={}):
+        '''
+        LCID GetThreadLocale();
+        '''
+        return 0xC000
+
     @apihook('OutputDebugString', argc=1)
     def OutputDebugString(self, emu, argv, ctx={}):
         '''
@@ -150,7 +163,24 @@ class Kernel32(api.ApiHandler):
         _str, = argv
         cw = self.get_char_width(ctx)
         argv[0] = self.read_mem_string(_str, cw)
-        
+
+    @apihook('GetThreadTimes', argc=5)
+    def GetThreadTimes(self, emu, argv, ctx={}):
+        '''
+        BOOL GetThreadTimes(
+            HANDLE     hThread,
+            LPFILETIME lpCreationTime,
+            LPFILETIME lpExitTime,
+            LPFILETIME lpKernelTime,
+            LPFILETIME lpUserTime
+        );
+        '''
+        hnd, lpCreationTime, lpExitTime, lpKernelTime, lpUserTime = argv
+
+        if lpCreationTime:
+            self.mem_write(lpCreationTime, b'\x20\x20\x00\x00')
+        return True
+
     @apihook('GetProcessHeap', argc=0)
     def GetProcessHeap(self, emu, argv, ctx={}):
         '''
@@ -162,6 +192,22 @@ class Kernel32(api.ApiHandler):
         else:
             heap = self.heaps[0]
         return heap
+
+    @apihook('GetProcessVersion', argc=1)
+    def GetProcessVersion(self, emu, argv, ctx={}):
+        '''
+        DWORD GetProcessVersion(
+            DWORD ProcessId
+        );
+        '''
+
+        ver = self.get_os_version()
+        major = ver['major']
+        minor = ver['minor']
+
+        rv = 0xFFFFFFFF & (major << 16 | minor)
+
+        return rv
 
     @apihook('DisableThreadLibraryCalls', argc=1)
     def DisableThreadLibraryCalls(self, emu, argv, ctx={}):
@@ -192,7 +238,15 @@ class Kernel32(api.ApiHandler):
         if name:
             name = self.read_mem_string(name, cw)
 
-        hnd, evt = emu.create_mutant(name)
+        obj = self.get_object_from_name(name)
+
+        hnd = 0
+        if obj:
+            hnd = emu.get_object_handle(obj)
+            emu.set_last_error(windefs.ERROR_ALREADY_EXISTS)
+        else:
+            emu.set_last_error(windefs.ERROR_SUCCESS)
+            hnd, evt = emu.create_mutant(name)
 
         argv[2] = name
         return hnd
@@ -459,6 +513,30 @@ class Kernel32(api.ApiHandler):
 
         return hmod
 
+    @apihook('CreateProcessInternal', argc=12)
+    def CreateProcessInternal(self, emu, argv, ctx={}):
+        '''
+        BOOL CreateProcessInternal(
+          PVOID Reserved1,
+          LPTSTR                lpApplicationName,
+          LPTSTR                lpCommandLine,
+          LPSECURITY_ATTRIBUTES lpProcessAttributes,
+          LPSECURITY_ATTRIBUTES lpThreadAttributes,
+          BOOL                  bInheritHandles,
+          DWORD                 dwCreationFlags,
+          LPVOID                lpEnvironment,
+          LPTSTR                lpCurrentDirectory,
+          LPSTARTUPINFO         lpStartupInfo,
+          LPPROCESS_INFORMATION lpProcessInformation,
+          PVOID Reserved2
+        );
+        '''
+        # Args are the same as CreateProcess except for argv[0] and argv[-1]
+        _argv = argv[1:-1]
+        rv = self.CreateProcess(emu, _argv, ctx)
+        argv[1:-1] = _argv
+        return rv
+
     @apihook('CreateProcess', argc=10)
     def CreateProcess(self, emu, argv, ctx={}):
         '''BOOL CreateProcess(
@@ -524,12 +602,14 @@ class Kernel32(api.ApiHandler):
 
     @apihook('VirtualAlloc', argc=4)
     def VirtualAlloc(self, emu, argv, ctx={}):
+
         '''LPVOID WINAPI VirtualAlloc(
           _In_opt_ LPVOID lpAddress,
           _In_     SIZE_T dwSize,
           _In_     DWORD  flAllocationType,
           _In_     DWORD  flProtect
         );'''
+
         lpAddress, dwSize, flAllocationType, flProtect = argv
         buf = 0
         tag_prefix = 'api.VirtualAlloc'
@@ -789,9 +869,17 @@ class Kernel32(api.ApiHandler):
          lpParameter, dwCreationFlags, lpThreadId) = argv
 
         proc_obj = emu.get_current_process()
+        def_flags = windefs.get_creation_flags(dwCreationFlags)
+        if def_flags:
+            def_flags = ' | '.join(def_flags)
+            argv[4] = def_flags
+
+        is_suspended = False
+        if dwCreationFlags & windefs.CREATE_SUSPENDED:
+            is_suspended = True
 
         handle, obj = self.create_thread(lpStartAddress, lpParameter,
-                                         proc_obj, thread_type='thread')
+                                         proc_obj, thread_type='thread', is_suspended=is_suspended)
 
         if not obj:
             return handle
@@ -820,20 +908,14 @@ class Kernel32(api.ApiHandler):
         if rv > 0:
             obj.suspend_count -= 1
 
-        if obj.modified_pc:
-            context = obj.get_context()
-            proc = obj.process
-            # We are making an assumption here and if it causes an issue,
-            # I will revisit this. For now, if a thread was in a suspended state,
-            # then has its program counter modified, and is then resumed, we
-            # assume the author is hijacking the original thread and we will
-            # attempt to emulate it.
-            if emu.get_arch() == e_arch.ARCH_X86:
+        if emu.get_arch() == e_arch.ARCH_X86:
+            if not emu.resume_thread(obj):
+                context = obj.get_context()
+                proc = obj.process
                 handle, obj = self.create_thread(context.Eip, 0,
                                                  proc,
                                                  thread_type='thread.%s.%d' % (proc.name,
                                                                                proc.get_id()))
-
         return rv
 
     @apihook('SuspendThread', argc=1)
@@ -1475,10 +1557,11 @@ class Kernel32(api.ApiHandler):
         cw = self.get_char_width(ctx)
 
         s = self.read_mem_string(src, cw)
-        s = s[:iMaxLength]
+        argv[1] = s
+        s = s[:iMaxLength - 1]
+        s += '\x00'
 
         self.write_mem_string(s, dest, cw)
-        argv[1] = s
         return dest
 
     @apihook('lstrcpy', argc=2)
@@ -1627,7 +1710,7 @@ class Kernel32(api.ApiHandler):
         thread = emu.get_current_thread()
         tls = thread.get_tls()
 
-        if dwTlsIndex <= len(tls):
+        if dwTlsIndex < len(tls):
             tls[dwTlsIndex] = lpTlsValue
             thread.set_tls(tls)
             rv = 1
@@ -1650,7 +1733,7 @@ class Kernel32(api.ApiHandler):
         thread = emu.get_current_thread()
         tls = thread.get_tls()
 
-        if dwTlsIndex <= len(tls):
+        if dwTlsIndex < len(tls):
             rv = tls[dwTlsIndex]
             emu.set_last_error(windefs.ERROR_SUCCESS)
         else:
@@ -2176,6 +2259,10 @@ class Kernel32(api.ApiHandler):
                 mbs = self.read_mem_string(lpMultiByteStr, 1)
                 argv[2] = mbs
                 rv = len(mbs) + 1
+            else:
+                mbs = self.read_mem_string(lpMultiByteStr, 1)
+                argv[2] = mbs
+                rv = len(mbs) + 1
         elif lpMultiByteStr == 0 or cbMultiByte == 0:
             emu.set_last_error(windefs.ERROR_INSUFFICIENT_BUFFER)
             rv = 0
@@ -2274,6 +2361,7 @@ class Kernel32(api.ApiHandler):
 
                 b = (ctype).to_bytes(2, 'little')
                 output += b
+                rv = 1
 
             self.mem_write(lpCharType, output)
 
@@ -2379,7 +2467,7 @@ class Kernel32(api.ApiHandler):
                 out = filename.encode('utf-8')
 
             size = int(len(out) / cw)
-            if nSize < size + 1 * cw: # null terminator
+            if nSize < size + 1 * cw:  # null terminator
                 emu.set_last_error(windefs.ERROR_INSUFFICIENT_BUFFER)
                 out = out[:nSize - 1 * cw] + b'\0' * cw
             else:
@@ -2421,6 +2509,34 @@ class Kernel32(api.ApiHandler):
         emu.set_last_error(windefs.ERROR_SUCCESS)
         return rv
 
+    @apihook('GlobalHandle', argc=1)
+    def GlobalHandle(self, emu, argv, ctx={}):
+        '''
+        HGLOBAL GlobalHandle(
+            LPCVOID pMem
+        );
+        '''
+        pMem, = argv
+        return pMem
+
+    @apihook('GlobalUnlock', argc=1)
+    def GlobalUnlock(self, emu, argv, ctx={}):
+        '''
+        BOOL GlobalUnlock(
+            HGLOBAL hMem
+        );
+        '''
+        return 0
+
+    @apihook('GlobalFree', argc=1)
+    def GlobalFree(self, emu, argv, ctx={}):
+        '''
+        HGLOBAL GlobalFree(
+            _Frees_ptr_opt_ HGLOBAL hMem
+        );
+        '''
+        return 0
+
     @apihook('GetSystemDirectory', argc=2)
     def GetSystemDirectory(self, emu, argv, ctx={}):
         '''
@@ -2453,6 +2569,48 @@ class Kernel32(api.ApiHandler):
                 rv = len(sysroot)
 
         return rv
+
+    @apihook('IsDBCSLeadByte', argc=1)
+    def IsDBCSLeadByte(self, emu, argv, ctx={}):
+        '''
+        BOOL IsDBCSLeadByte(
+            BYTE TestChar
+        );
+        '''
+        return True
+
+    @apihook('SetEnvironmentVariable', argc=2)
+    def SetEnvironmentVariable(self, emu, argv, ctx={}):
+        '''
+        BOOL SetEnvironmentVariable(
+            LPCTSTR lpName,
+            LPCTSTR lpValue
+            );
+        '''
+        lpName, lpValue = argv
+        cw = self.get_char_width(ctx)
+        if lpName and lpValue:
+            name = self.read_mem_string(lpName, cw)
+            val = self.read_mem_string(lpValue, cw)
+            argv[0] = name
+            argv[1] = val
+            emu.set_env(name, val)
+        return True
+
+    @apihook('SetDllDirectory', argc=1)
+    def SetDllDirectory(self, emu, argv, ctx={}):
+        '''
+        BOOL SetDllDirectory(
+            LPCSTR lpPathName
+        );
+        '''
+        path, = argv
+
+        cw = self.get_char_width(ctx)
+        if path:
+            path = self.read_mem_string(path, cw)
+            argv[0] = path
+        return True
 
     @apihook('GetWindowsDirectory', argc=2)
     def GetWindowsDirectory(self, emu, argv, ctx={}):
@@ -2604,6 +2762,45 @@ class Kernel32(api.ApiHandler):
             rv = windefs.FILE_ATTRIBUTE_NORMAL
         return rv
 
+    @apihook('CreateDirectory', argc=2)
+    def CreateDirectory(self, emu, argv, ctx={}):
+        '''
+        BOOL CreateDirectory(
+            LPCSTR                lpPathName,
+            LPSECURITY_ATTRIBUTES lpSecurityAttributes
+        );
+        '''
+        pn, sec = argv
+        cw = self.get_char_width(ctx)
+
+        if pn:
+            target = self.read_mem_string(pn, cw)
+            argv[0] = target
+        return True
+
+    @apihook('CopyFile', argc=3)
+    def CopyFile(self, emu, argv, ctx={}):
+        '''
+        BOOL CopyFile(
+            LPCTSTR lpExistingFileName,
+            LPCTSTR lpNewFileName,
+            BOOL    bFailIfExists
+        );
+        '''
+        src, dst, fail = argv
+        cw = self.get_char_width(ctx)
+
+        if src:
+            _src = self.read_mem_string(src, cw)
+            argv[0] = _src
+        if dst:
+            _dst = self.read_mem_string(dst, cw)
+            argv[1] = _dst
+            self.file_open(_dst, create=True)
+            self.log_file_access(_dst, 'create')
+            self.log_file_access(_dst, 'write')
+        return True
+
     @apihook('CreateFile', argc=7)
     def CreateFile(self, emu, argv, ctx={}):
         '''
@@ -2742,6 +2939,7 @@ class Kernel32(api.ApiHandler):
         rv = 0
 
         f = self.file_get(hFile)
+        data = self.mem_read(lpBuffer, num_bytes)
         if f:
             path = f.get_path()
             data = self.mem_read(lpBuffer, num_bytes)
@@ -2751,7 +2949,7 @@ class Kernel32(api.ApiHandler):
                 self.log_file_access(path, 'write', data=data, buffer=lpBuffer, size=num_bytes)
 
                 data = data.hex()
-                argv[2] = data[:0x20]
+                argv[1] = "%s (%s)" % (hex(lpBuffer), data[:0x20])
 
                 rv = 1
                 emu.set_last_error(windefs.ERROR_SUCCESS)
@@ -2809,6 +3007,28 @@ class Kernel32(api.ApiHandler):
 
         return low
 
+    @apihook('GetFileSizeEx', argc=2)
+    def GetFileSizeEx(self, emu, argv, ctx={}):
+        '''
+        BOOL GetFileSizeEx(
+          HANDLE         hFile,
+          PLARGE_INTEGER lpFileSize
+        );
+        '''
+        hFile, lpFileSize = argv
+        f = self.file_get(hFile)
+
+        if f:
+            full_size = f.get_size()
+            size_bytes = full_size.to_bytes(8, 'little')
+            if lpFileSize:
+                self.mem_write(lpFileSize, size_bytes)
+            emu.set_last_error(windefs.ERROR_SUCCESS)
+            return 1
+        emu.set_last_error(windefs.ERROR_INVALID_PARAMETER)
+        return 0
+
+
     @apihook('CloseHandle', argc=1)
     def CloseHandle(self, emu, argv, ctx={}):
         '''
@@ -2819,6 +3039,7 @@ class Kernel32(api.ApiHandler):
         hObject, = argv
         obj = self.get_object_from_handle(hObject)
         if obj:
+            emu.dec_ref(obj)
             return True
         return False
 
@@ -2829,6 +3050,29 @@ class Kernel32(api.ApiHandler):
         '''
 
         return False
+
+    @apihook('GetVolumeInformation', argc=8)
+    def GetVolumeInformation(self, emu, argv, ctx={}):
+        '''
+        BOOL GetVolumeInformation(
+            LPCSTR  lpRootPathName,
+            LPSTR   lpVolumeNameBuffer,
+            DWORD   nVolumeNameSize,
+            LPDWORD lpVolumeSerialNumber,
+            LPDWORD lpMaximumComponentLength,
+            LPDWORD lpFileSystemFlags,
+            LPSTR   lpFileSystemNameBuffer,
+            DWORD   nFileSystemNameSize
+        );
+        '''
+        root, vol_buf, vol_size, serial, comp_len, fs_flags, fs_name, fs_name_len = argv
+
+        cw = self.get_char_width(ctx)
+        if root:
+            root_name = self.read_mem_string(root, cw)
+            argv[0] = root_name
+
+        return True
 
     @apihook('CreateEvent', argc=4)
     def CreateEvent(self, emu, argv, ctx={}):
@@ -2844,13 +3088,64 @@ class Kernel32(api.ApiHandler):
 
         cw = self.get_char_width(ctx)
         evt_name = None
+        obj = None
         if name:
             evt_name = self.read_mem_string(name, cw)
             argv[3] = evt_name
+            obj = self.get_object_from_name(evt_name)
 
-        hnd, evt = emu.create_event(evt_name)
+        if obj:
+            hnd = obj.get_handle()
+            emu.set_last_error(windefs.ERROR_ALREADY_EXISTS)
+        else:
+            hnd, evt = emu.create_event(evt_name)
 
         return hnd
+
+    @apihook('OpenEvent', argc=3)
+    def OpenEvent(self, emu, argv, ctx={}):
+        '''
+        HANDLE OpenEvent(
+            DWORD  dwDesiredAccess,
+            BOOL   bInheritHandle,
+            LPCSTR lpName
+        );
+        '''
+        access, inherit, name = argv
+
+        cw = self.get_char_width(ctx)
+        evt_name = None
+        hnd = 0
+        if name:
+            evt_name = self.read_mem_string(name, cw)
+            argv[2] = evt_name
+
+        obj = self.get_object_from_name(evt_name)
+
+        if obj:
+            hnd = obj.get_handle()
+            emu.set_last_error(windefs.ERROR_ALREADY_EXISTS)
+        else:
+            emu.set_last_error(windefs.ERROR_PATH_NOT_FOUND)
+
+        return hnd
+
+    @apihook('SetEvent', argc=1)
+    def SetEvent(self, emu, argv, ctx={}):
+        '''
+        BOOL SetEvent(
+            HANDLE hEvent
+        );
+        '''
+        hEvent, = argv
+
+        obj = self.get_object_from_handle(hEvent)
+
+        rv = False
+        if obj:
+            emu.set_last_error(windefs.ERROR_SUCCESS)
+            rv = True
+        return rv
 
     @apihook('SetUnhandledExceptionFilter', argc=1)
     def SetUnhandledExceptionFilter(self, emu, argv, ctx={}):
@@ -2859,6 +3154,9 @@ class Kernel32(api.ApiHandler):
           LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter
         );
         '''
+        lpTopLevelExceptionFilter, = argv
+
+        emu.set_unhandled_exception_handler(lpTopLevelExceptionFilter)
 
         return 0
 
@@ -2958,6 +3256,18 @@ class Kernel32(api.ApiHandler):
         emu.set_last_error(windefs.ERROR_SUCCESS)
         return hMem
 
+    @apihook('LocalLock', argc=1)
+    def LocalLock(self, emu, argv, ctx={}):
+        '''
+        LPVOID LocalLock(
+          HGLOBAL hMem
+        );
+        '''
+        hMem, = argv
+
+        emu.set_last_error(windefs.ERROR_SUCCESS)
+        return hMem
+
     @apihook('HeapDestroy', argc=1)
     def HeapDestroy(self, emu, argv, ctx={}):
         '''
@@ -2999,8 +3309,15 @@ class Kernel32(api.ApiHandler):
         DWORD  dwMilliseconds
         );
         '''
+        hHandle, dwMilliseconds = argv
 
-        return 0
+        # TODO
+        if dwMilliseconds == 1:
+            rv = windefs.WAIT_TIMEOUT
+        else:
+            rv = windefs.WAIT_OBJECT_0
+
+        return rv
 
     @apihook('GetConsoleMode', argc=2)
     def GetConsoleMode(self, emu, argv, ctx={}):
@@ -3097,7 +3414,8 @@ class Kernel32(api.ApiHandler):
             argv[0] = pipe_name
 
         hnd = emu.pipe_open(pipe_name, dwOpenMode, nMaxInstances, nOutBufferSize, nInBufferSize)
-
+        if not hnd:
+            hnd = windefs.INVALID_HANDLE_VALUE
         return hnd
 
     @apihook('ConnectNamedPipe', argc=2)
@@ -3416,6 +3734,7 @@ class Kernel32(api.ApiHandler):
             return False
 
         context = obj.get_context()
+
         self.mem_write(lpContext, context.get_bytes())
 
         return True
@@ -3684,6 +4003,13 @@ class Kernel32(api.ApiHandler):
 
         return True
 
+    @apihook('FreeConsole', argc=0)
+    def FreeConsole(self, emu, argv, ctx={}):
+        '''
+        BOOL WINAPI FreeConsole(void);
+        '''
+        return True
+
     @apihook('IsBadWritePtr', argc=2)
     def IsBadWritePtr(self, emu, argv, ctx={}):
         '''
@@ -3853,3 +4179,146 @@ class Kernel32(api.ApiHandler):
             self.write_mem_string(out, lpszShortPath, cw)
 
         return len(out) + 1
+
+    @apihook('QueueUserAPC', argc=3)
+    def QueueUserAPC(self, emu, argv, ctx={}):
+        """
+        DWORD QueueUserAPC(
+        PAPCFUNC  pfnAPC,
+        HANDLE    hThread,
+        ULONG_PTR dwData
+        );
+        """
+        pfnAPC, hThread, dwData = argv
+        run_type = 'apc_thread_%x' % hThread
+        self.create_thread(pfnAPC, dwData, 0, thread_type=run_type)
+
+    @apihook('GetThreadTimes', argc=5)
+    def GetThreadTimes(self, emu, argv, ctx={}):
+        """
+        BOOL GetThreadTimes(
+          HANDLE     hThread,
+          LPFILETIME lpCreationTime,
+          LPFILETIME lpExitTime,
+          LPFILETIME lpKernelTime,
+          LPFILETIME lpUserTime
+        );
+        """
+        return 0
+
+    @apihook('DuplicateHandle', argc=7)
+    def DuplicateHandle(self, emu, argv, ctx={}):
+        """
+        BOOL DuplicateHandle(
+          HANDLE   hSourceProcessHandle,
+          HANDLE   hSourceHandle,
+          HANDLE   hTargetProcessHandle,
+          LPHANDLE lpTargetHandle,
+          DWORD    dwDesiredAccess,
+          BOOL     bInheritHandle,
+          DWORD    dwOptions
+        )
+        """
+        return 0
+
+    @apihook('GetBinaryType', argc=2)
+    def GetBinaryType(self, emu, argv, ctx={}):
+        """
+        BOOL GetBinaryTypeA(
+          LPCSTR  lpApplicationName,
+          LPDWORD lpBinaryType
+        );
+        """
+        return 0
+
+
+    @apihook('GetThreadUILanguage', argc=0)
+    def GetThreadUILanguage(self, emu, argv, ctx={}):
+        """
+        LANGID GetThreadUILanguage();
+        """
+        return 0xffff
+
+    @apihook('SetConsoleHistoryInfo', argc=1)
+    def SetConsoleHistoryInfo(self, emu, argv, ctx={}):
+        """
+        BOOL WINAPI SetConsoleHistoryInfo(
+          _In_ PCONSOLE_HISTORY_INFO lpConsoleHistoryInfo
+        );
+        """
+        return 1
+
+
+    @apihook('GetFileInformationByHandle', argc=2)
+    def GetFileInformationByHandle(self, emu, argv, ctx={}):
+        """
+        BOOL GetFileInformationByHandle(
+          HANDLE                       hFile,
+          LPBY_HANDLE_FILE_INFORMATION lpFileInformation
+        );
+        """
+        return 0
+
+    @apihook('GetCommProperties', argc=2)
+    def GetCommProperties(self, emu, argv, ctx={}):
+        """
+        BOOL GetCommProperties(
+          HANDLE     hFile,
+          LPCOMMPROP lpCommProp
+        );
+        """
+        return 0
+
+    @apihook('GetCommTimeouts', argc=2)
+    def GetCommTimeouts(self, emu, argv, ctx={}):
+        """
+        BOOL GetCommTimeouts(
+          HANDLE         hFile,
+          LPCOMMTIMEOUTS lpCommTimeouts
+        );
+        """
+        return 0
+
+    @apihook('AddAtom', argc=1)
+    def AddAtom(self, emu, argv, ctx={}):
+        """
+        ATOM AddAtomW(
+          LPCWSTR lpString
+        );
+        """
+        return 0
+
+    @apihook('GetProcessHandleCount', argc=1)
+    def GetProcessHandleCount(self, emu, argv, ctx={}):
+        """
+        BOOL GetProcessHandleCount(
+          HANDLE hProcess,
+          PDWORD pdwHandleCount
+        );
+        """
+        return  0
+
+    @apihook('GetMailslotInfo', argc=5)
+    def GetMailslotInfo(self, emu, argv, ctx={}):
+        """
+        BOOL GetMailslotInfo(
+          HANDLE  hMailslot,
+          LPDWORD lpMaxMessageSize,
+          LPDWORD lpNextSize,
+          LPDWORD lpMessageCount,
+          LPDWORD lpReadTimeout
+        );
+        """
+        return 0
+
+    @apihook('RtlZeroMemory', argc=2)
+    def RtlZeroMemory(self, emu, argv, ctx={}):
+        """
+        void RtlZeroMemory(
+            void*  Destination,
+            size_t Length
+        );
+        """
+        dest,length = argv
+        buf = b'\x00' * length
+        self.mem_write(dest, buf)
