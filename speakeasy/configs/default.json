@@ -30,7 +30,7 @@
 
     "env": {
         "comspec": "C:\\Windows\\system32\\cmd.exe",
-        "systemroot": "C:\\Windows\\system32",
+        "systemroot": "C:\\Windows",
         "windir": "C:\\Windows",
         "temp": "C:\\Windows\\temp\\",
         "userprofile": "C:\\Users\\speakeasy_user",
@@ -38,6 +38,8 @@
         "allusersprofile": "C:\\ProgramData",
         "programfiles": "C:\\Program Files"
     },
+
+    "domain": "speakeasy_domain",
 
     "hostname": "speakeasy_host",
 
@@ -59,6 +61,29 @@
         {
             "name": "\\??\\PhysicalDrive0",
             "target": "\\Device\\Harddisk0\\DR0"
+        }
+    ],
+
+    "drives": [
+        {
+            "root_path": "C:\\",
+            "drive_type": "DRIVE_FIXED",
+            "volume_guid_path": "\\\\?\\Volume{bb1d6623-5e53-11ea-a949-100000000001}\\"
+        },
+        {
+            "root_path": "D:\\",
+            "drive_type": "DRIVE_CDROM",
+            "volume_guid_path": "\\\\?\\Volume{bb1d6623-5e53-11ea-a949-100000000002}\\"
+        },
+        {
+            "root_path": "E:\\",
+            "drive_type": "DRIVE_REMOTE",
+            "volume_guid_path": "\\\\?\\Volume{bb1d6623-5e53-11ea-a949-100000000003}\\"
+        },
+        {
+            "root_path": "F:\\",
+            "drive_type": "DRIVE_REMOVABLE",
+            "volume_guid_path": "\\\\?\\Volume{bb1d6623-5e53-11ea-a949-100000000004}\\"
         }
     ],
 
@@ -247,7 +272,7 @@
         {
             "name": "main",
             "base_addr": "0x00400000",
-            "path": "C:\\Windows\\system32\\main.exe",
+            "path": "C:\\Windows\\system32\\svchost.exe",
             "command_line": "svchost.exe",
             "is_main_exe": true,
             "session": 1
@@ -256,6 +281,8 @@
 
     "modules": {
         "modules_always_exist": false,
+        "functions_always_exist": false,
+
         "module_directory_x86": "$ROOT$/winenv/decoys/x86",
         "module_directory_x64": "$ROOT$/winenv/decoys/amd64",
 
@@ -342,14 +369,14 @@
 
         "user_modules": [
                 {
-                    "name": "kernel32",
-                    "base_addr": "0x77000000",
-                    "path": "C:\\Windows\\system32\\kernel32.dll"
-                },
-                {
                     "name": "ntdll",
                     "base_addr": "0x7C000000",
                     "path": "C:\\Windows\\system32\\ntdll.dll"
+                },
+                {
+                    "name": "kernel32",
+                    "base_addr": "0x77000000",
+                    "path": "C:\\Windows\\system32\\kernel32.dll"
                 },
                 {
                     "name": "ws2_32",
@@ -467,9 +494,54 @@
                     "path": "C:\\Windows\\system32\\NETAPI32.dll"
                 },
                 {
+                    "name": "rpcrt4",
+                    "base_addr": "0x53300000",
+                    "path": "C:\\Windows\\system32\\Rpcrt4.dll"
+                },
+                {
+                    "name": "linkinfo",
+                    "base_addr": "0x63300000",
+                    "path": "C:\\Windows\\system32\\linkinfo.dll"
+                },
+                {
+                    "name": "EhStorShell",
+                    "base_addr": "0x73300000",
+                    "path": "C:\\Windows\\system32\\EhStorShell.dll"
+                },
+                {
                     "name": "comctl32",
                     "base_addr": "0x5f500000",
                     "path": "C:\\Windows\\system32\\comctl32.dll"
+                },
+                {
+                    "name": "secur32",
+                    "base_addr": "0x5f600000",
+                    "path": "C:\\Windows\\system32\\secur32.dll"
+                },
+                {
+                    "name": "KtmW32",
+                    "base_addr": "0x5f700000",
+                    "path": "C:\\Windows\\system32\\KtmW32.dll"
+                },
+                {
+                    "name": "oleaut32",
+                    "base_addr": "0x5f800000",
+                    "path": "C:\\Windows\\system32\\oleaut32.dll"
+                },
+                {
+                    "name": "bcrypt",
+                    "base_addr": "0x5f900000",
+                    "path": "C:\\Windows\\system32\\bcrypt.dll"
+                },
+                {
+                    "name": "ncrypt",
+                    "base_addr": "0x5fa00000",
+                    "path": "C:\\Windows\\system32\\ncrypt.dll"
+                },
+                {
+                    "name": "netutils",
+                    "base_addr": "0x5fb00000",
+                    "path": "C:\\Windows\\system32\\netutils.dll"
                 }
         ]
     }

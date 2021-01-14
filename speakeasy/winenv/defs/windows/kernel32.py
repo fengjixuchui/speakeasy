@@ -18,6 +18,41 @@ TH32CS_SNAPTHREAD = 0x00000004
 PROCESSOR_ARCHITECTURE_AMD64 = 9
 PROCESSOR_ARCHITECTURE_INTEL = 0
 
+LOCALE_INVARIANT = 0x7F
+LOCALE_USER_DEFAULT = 0x400
+LOCALE_SYSTEM_DEFAULT = 0x800
+LOCALE_CUSTOM_DEFAULT = 0xC00
+LOCALE_CUSTOM_UNSPECIFIED = 0x1000
+LOCALE_CUSTOM_UI_DEFAULT = 0x1400
+
+LOCALE_SENGLISHLANGUAGENAME = 0x1001
+LOCALE_SENGLISHCOUNTRYNAME = 0x1002
+
+DRIVE_UNKNOWN = 0
+DRIVE_NO_ROOT_DIR = 1
+DRIVE_REMOVABLE = 2
+DRIVE_FIXED = 3
+DRIVE_REMOTE = 4
+DRIVE_CDROM = 5
+DRIVE_RAMDISK = 6
+
+ComputerNameNetBIOS = 0
+ComputerNameDnsHostname = 1
+ComputerNameDnsDomain = 2
+ComputerNameDnsFullyQualified = 3
+ComputerNamePhysicalNetBIOS = 4
+ComputerNamePhysicalDnsHostname = 5
+ComputerNamePhysicalDnsDomain = 6
+ComputerNamePhysicalDnsFullyQualified = 7
+ComputerNameMax = 8
+
+NetSetupUnknownStatus = 0
+NetSetupUnjoined = 1
+NetSetupWorkgroupName = 2
+NetSetupDomainName = 3
+
+GetFileExInfoStandard = 0
+
 
 class PROCESSENTRY32(EmuStruct):
     def __init__(self, ptr_size, width):
@@ -75,6 +110,17 @@ class WIN32_FIND_DATA(EmuStruct):
         self.dwReserved1 = ct.c_uint32
         self.cFileName = ct.c_uint8 * (260 * width)
         self.cAlternateFileName = ct.c_uint8 * (14 * width)
+
+
+class WIN32_FILE_ATTRIBUTE_DATA(EmuStruct):
+    def __init__(self, ptr_size):
+        super().__init__(ptr_size)
+        self.dwFileAttributes = ct.c_uint32
+        self.ftCreationTime = FILETIME
+        self.ftLastAccessTime = FILETIME
+        self.ftLastWriteTime = FILETIME
+        self.nFileSizeHigh = ct.c_uint32
+        self.nFileSizeLow = ct.c_uint32
 
 
 class SYSTEM_INFO(EmuStruct):
@@ -147,6 +193,28 @@ class OSVERSIONINFOEX(EmuStruct):
         self.dwPlatformId = ct.c_uint16
         self.wProductType = ct.c_uint8
         self.wReserved = ct.c_uint8
+
+
+def get_define(define, prefix=''):
+    for k, v in globals().items():
+        if not isinstance(v, int) or v != define:
+            continue
+        if prefix:
+            if k.startswith(prefix):
+                return k
+        else:
+            return k
+
+
+def get_define_value(define, prefix=''):
+    for k, v in globals().items():
+        if not isinstance(v, int) or k != define:
+            continue
+        if prefix:
+            if k.startswith(prefix):
+                return v
+        else:
+            return v
 
 
 def get_flag_defines(flags, prefix=''):

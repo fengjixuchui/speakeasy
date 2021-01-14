@@ -20,6 +20,8 @@ IDI_SHIELD = 32518
 IDI_WARNING = 32515
 IDI_WINLOGO = 32517
 
+UOI_FLAGS = 1
+
 
 class User32(api.ApiHandler):
 
@@ -41,6 +43,7 @@ class User32(api.ApiHandler):
         self.handle = 0
         self.win = None
         self.handles = []
+        self.timer_count = 0
         self.sessman = sessman.SessionManager(config=None)
 
         super(User32, self).__get_hook_attrs__(self)
@@ -153,6 +156,54 @@ class User32(api.ApiHandler):
         );
         '''
 
+        return 1
+
+    @apihook('SetCursorPos', argc=2)
+    def SetCursorPos(self, emu, argv, ctx={}):
+        '''
+        BOOL SetCursorPos(
+        int X,
+        int Y
+        );
+        '''
+        return 1
+
+    @apihook('CloseDesktop', argc=1)
+    def CloseDesktop(self, emu, argv, ctx={}):
+        '''
+        BOOL CloseDesktop(
+        HDESK hDesktop
+        );
+        '''
+        return 1
+
+    @apihook('CloseWindowStation', argc=1)
+    def CloseWindowStation(self, emu, argv, ctx={}):
+        '''
+        BOOL CloseWindowStation(
+        HWINSTA hWinSta
+        );
+        '''
+        return 1
+
+    @apihook('GetThreadDesktop', argc=1)
+    def GetThreadDesktop(self, emu, argv, ctx={}):
+        '''
+        HDESK GetThreadDesktop(
+        DWORD dwThreadId
+        );
+        '''
+        return 1
+
+    @apihook('OpenWindowStation', argc=3)
+    def OpenWindowStation(self, emu, argv, ctx={}):
+        '''
+        HWINSTA OpenWindowStation(
+        LPCSTR      lpszWinSta,
+        BOOL        fInherit,
+        ACCESS_MASK dwDesiredAccess
+        );
+        '''
         return 1
 
     @apihook('ChangeWindowMessageFilter', argc=2)
@@ -545,7 +596,13 @@ class User32(api.ApiHandler):
         try:
             msg = t.message_queue.pop(0)
         except IndexError:
-            return False
+            # If the queue is empty but a timer is active, write a WM_TIMER message and return True
+            if self.timer_count > 0:
+                msg = windefs.MSG(emu.get_ptr_size())
+                msg.hwnd = hWnd
+                msg.message = windefs.WM_TIMER
+            else:
+                return False
 
         self.mem_write(lpMsg, msg.get_bytes())
 
@@ -652,6 +709,7 @@ class User32(api.ApiHandler):
         self.write_string(fin, buf)
         argv.clear()
         argv.append(fin)
+        argv.append(fmt_str)
         return len(fin)
 
     @apihook('ReleaseDC', argc=2)
@@ -774,6 +832,103 @@ class User32(api.ApiHandler):
         cb_args = (hnd_parent, windefs.WM_INITDIALOG, param, 0)
         self.setup_callback(func, cb_args, caller_argv=argv)
         return self.get_handle()
+
+    @apihook('GetMenuInfo', argc=2)
+    def GetMenuInfo(self, emu, argv, ctx={}):
+        '''
+        BOOL GetMenuInfo(
+            HMENU,
+            LPMENUINFO
+        );
+        '''
+        return 1
+
+    @apihook('GetProcessWindowStation', argc=0)
+    def GetProcessWindowStation(self, emu, argv, ctx={}):
+        '''
+        HWINSTA GetProcessWindowStation();
+        '''
+        sta = self.sessman.get_current_station()
+        return sta.get_handle()
+
+    @apihook('LoadAccelerators', argc=2)
+    def LoadAccelerators(self, emu, argv, ctx={}):
+        '''
+        HACCEL LoadAccelerators(
+        HINSTANCE hInstance,
+        LPCSTR    lpTableName
+        );
+        '''
+        return self.get_handle()
+
+    @apihook('IsWindowVisible', argc=1)
+    def IsWindowVisible(self, emu, argv, ctx={}):
+        '''
+        BOOL IsWindowVisible(
+        HWND hWnd
+        );
+        '''
+        return True
+
+    @apihook('BeginPaint', argc=2)
+    def BeginPaint(self, emu, argv, ctx={}):
+        '''
+        HDC BeginPaint(
+        HWND          hWnd,
+        LPPAINTSTRUCT lpPaint
+        );
+        '''
+        return self.get_handle()
+
+    @apihook('LookupIconIdFromDirectory', argc=2)
+    def LookupIconIdFromDirectory(self, emu, argv, ctx={}):
+        '''
+        int LookupIconIdFromDirectory(
+        PBYTE presbits,
+        BOOL  fIcon
+        );
+        '''
+        return 1
+
+    @apihook('GetActiveWindow', argc=0)
+    def GetActiveWindow(self, emu, argv, ctx={}):
+        '''
+        HWND GetActiveWindow();
+        '''
+        return self.get_handle()
+
+    @apihook('GetLastActivePopup', argc=1)
+    def GetLastActivePopup(self, emu, argv, ctx={}):
+        '''
+        HWND GetLastActivePopup(
+        HWND hWnd
+        );
+        '''
+        hWnd, = argv
+        return self.get_handle()
+
+    @apihook('GetUserObjectInformation', argc=5)
+    def GetUserObjectInformation(self, emu, argv, ctx={}):
+        '''
+        BOOL GetUserObjectInformation(
+            HANDLE  hObj,
+            int     nIndex,
+            PVOID   pvInfo,
+            DWORD   nLength,
+            LPDWORD lpnLengthNeeded
+        );
+        '''
+        obj, index, info, length, needed = argv
+
+        if index == UOI_FLAGS:
+            uoi = windefs.USEROBJECTFLAGS(emu.get_ptr_size())
+            uoi.fInherit = 1
+            uoi.dwFlags = 1
+
+            if info:
+                self.mem_write(info, uoi.get_bytes())
+
+        return True
 
     @apihook('LoadIcon', argc=2)
     def LoadIcon(self, emu, argv, ctx={}):
@@ -1013,3 +1168,70 @@ class User32(api.ApiHandler):
             val = self.read_mem_string(_str, cw)
             self.write_mem_string(val.upper(), _str, cw)
             return _str
+
+    @apihook('SetTimer', argc=4)
+    def SetTimer(self, emu, argv, ctx={}):
+        """
+        UINT_PTR SetTimer(
+          HWND      hWnd,
+          UINT_PTR  nIDEvent,
+          UINT      uElapse,
+          TIMERPROC lpTimerFunc
+        );
+        """
+        self.timer_count += 1
+
+        return self.get_handle()
+
+    @apihook('KillTimer', argc=2)
+    def KillTimer(self, emu, argv, ctx={}):
+        """
+        BOOL KillTimer(
+          HWND     hWnd,
+          UINT_PTR uIDEvent
+        );
+        """
+        self.timer_count -= 1
+
+        return True
+
+    @apihook('OpenDesktop', argc=4)
+    def OpenDesktop(self, emu, argv, ctx={}):
+        """
+        HDESK OpenDesktopA(
+            LPCSTR      lpszDesktop,
+            DWORD       dwFlags,
+            BOOL        fInherit,
+            ACCESS_MASK dwDesiredAccess
+        );
+        """
+        lpszDesktop, dwFlags, fInherit, dwDesiredAccess = argv
+        cw = self.get_char_width(ctx)
+        desktop = self.read_mem_string(lpszDesktop, cw)
+        argv[0] = desktop
+        return self.get_handle()
+
+    @apihook('SetThreadDesktop', argc=1)
+    def SetThreadDesktop(self, emu, argv, ctx={}):
+        """
+        BOOL SetThreadDesktop(
+            HDESK hDesktop
+        );
+        """
+        return 0
+
+    @apihook('GetKeyboardLayoutList', argc=2)
+    def GetKeyboardLayoutList(self, emu, argv, ctx={}):
+        """
+        int GetKeyboardLayoutList(
+          int nBuff,
+          HKL *lpList
+        );
+        """
+        nBuff, lpList = argv
+
+        locale = 0x409      # English - United States
+        self.mem_write(lpList, locale.to_bytes(2, 'little'))
+        self.mem_write(lpList + 4, locale.to_bytes(2, 'little'))
+
+        return 1

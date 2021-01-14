@@ -17,12 +17,12 @@ class ApiHandler(object):
     name = ''
 
     @staticmethod
-    def apihook(impname, argc=0, conv=_arch.CALL_CONV_STDCALL, ordinal=None):
+    def apihook(impname=None, argc=0, conv=_arch.CALL_CONV_STDCALL, ordinal=None):
 
         def apitemp(f):
             if not callable(f):
                 raise ApiEmuError('Invalid function type supplied: %s' % (str(f)))
-            f.__apihook__ = (impname, f, argc, conv, ordinal)
+            f.__apihook__ = (impname or f.__name__, f, argc, conv, ordinal)
             return f
 
         return apitemp
@@ -277,6 +277,15 @@ class ApiHandler(object):
 
     def reg_get_subkeys(self, hkey):
         return self.emu.reg_get_subkeys(hkey)
+
+    def get_encoding(self, char_width):
+        if char_width == 2:
+            enc = 'utf-16le'
+        elif char_width == 1:
+            enc = 'utf-8'
+        else:
+            raise ApiEmuError('No encoding found for char width: %d' % (char_width))
+        return enc
 
     def mem_write(self, addr, data):
 

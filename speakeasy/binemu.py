@@ -96,6 +96,7 @@ class BinaryEmulator(MemoryManager):
         self.osversion = config.get('os_ver', {})
         self.env = config.get('env', {})
         self.user_config = config.get('user', {})
+        self.domain = config.get('domain')
         self.hostname = config.get('hostname')
         self.symlinks = config.get('symlinks', [])
         self.config_modules = config.get('modules', {})
@@ -108,6 +109,7 @@ class BinaryEmulator(MemoryManager):
         self.timeout = config.get('timeout', 0)
         self.max_api_count = config.get('max_api_count', 5000)
         self.exceptions = config.get('exceptions', {})
+        self.drive_config = config.get('drives', [])
         self.filesystem_config = config.get('filesystem', {})
         self.keep_memory_on_free = config.get('keep_memory_on_free', False)
 
@@ -138,6 +140,12 @@ class BinaryEmulator(MemoryManager):
             if major is not None and minor is not None:
                 verstr = '%s.%d_%d' % (os_name, major, minor)
                 return verstr
+
+    def get_domain(self):
+        """
+        Get domain of the machine being emulated
+        """
+        return self.domain
 
     def get_hostname(self):
         """
@@ -198,6 +206,12 @@ class BinaryEmulator(MemoryManager):
         """
         return self.filesystem_config
 
+    def get_drive_config(self):
+        """
+        Get the drive settings specified in the drives section of the config file
+        """
+        return self.drive_config
+
     def reg_write(self, reg, val):
         """
         Write a value to an emulated cpu register
@@ -241,20 +255,18 @@ class BinaryEmulator(MemoryManager):
                 tu = [i for i in self.disasm_eng.disasm_lite(bytes(mem), addr)]
                 address, size, mnem, oper = tu[0]
             else:
-                tu = [(i.mnemonic, i.op_str) for i in
-                      self.disasm_eng.disasm(bytes(mem), addr)]
-                mnem, oper = tu[0]
+                return [i for i in self.disasm_eng.disasm(bytes(mem), addr)]
         except IndexError:
             raise EmuException("Failed to disasm at address: 0x%x" % (addr))
 
         op = '%s %s' % (mnem, oper)
         return ((mnem, oper, op))
 
-    def disasm(self, mem, addr):
+    def disasm(self, mem, addr, fast=True):
         """
         Disassemble bytes at a specified address
         """
-        return self._cs_disasm(mem, addr)
+        return self._cs_disasm(mem, addr, fast=fast)
 
     def get_register_state(self):
         """
@@ -279,23 +291,27 @@ class BinaryEmulator(MemoryManager):
                               ('rip', e_arch.AMD64_REG_RIP),
                               ('rsi', e_arch.AMD64_REG_RSI),
                               ('rdi', e_arch.AMD64_REG_RDI),
+                              ('rax', e_arch.AMD64_REG_RAX),
+                              ('rbx', e_arch.AMD64_REG_RBX),
+                              ('rcx', e_arch.AMD64_REG_RCX),
+                              ('rdx', e_arch.AMD64_REG_RDX),
                               ('r8',  e_arch.AMD64_REG_R8),
                               ('r9',  e_arch.AMD64_REG_R9),
                               ('r10', e_arch.AMD64_REG_R10),
                               ('r11', e_arch.AMD64_REG_R11),
-                              ('rax', e_arch.AMD64_REG_RAX),
-                              ('rbx', e_arch.AMD64_REG_RBX),
-                              ('rcx', e_arch.AMD64_REG_RCX),
-                              ('rdx', e_arch.AMD64_REG_RDX)):
+                              ('r12', e_arch.AMD64_REG_R12),
+                              ('r13', e_arch.AMD64_REG_R13),
+                              ('r14', e_arch.AMD64_REG_R14),
+                              ('r15', e_arch.AMD64_REG_R15)):
                 val = self.reg_read(reg)
                 regs[name] = "{0:#0{1}x}".format(val, 2 + (self.get_ptr_size() * 2))
         return regs
 
-    def get_disasm(self, addr, size):
+    def get_disasm(self, addr, size, fast=True):
         """
         Get the disassembly from an address
         """
-        return self.disasm(self.mem_read(addr, size), addr)
+        return self.disasm(self.mem_read(addr, size), addr, fast)
 
     def set_func_args(self, stack_addr, ret_addr, *args, home_space=True):
         """
@@ -811,16 +827,18 @@ class BinaryEmulator(MemoryManager):
                     return hook
         return None
 
-    def add_api_hook(self, cb, module='', api_name='', argc=0, call_conv=None, emu=None):
+    def add_api_hook(self, cb, module='', api_name='', argc=0, call_conv=None, emu=None,
+                     enable_wild_cards=True):
         """
         Add an API level hook (e.g. kernel32.CreateFile) here
         """
 
         contains_wild_cards = False
-        for wc in ['?', '*', '[', ']']:
-            if wc in api_name:
-                contains_wild_cards = True
-                break
+        if enable_wild_cards:
+            for wc in ['?', '*', '[', ']']:
+                if wc in api_name:
+                    contains_wild_cards = True
+                    break
 
         if not emu:
             emu = self

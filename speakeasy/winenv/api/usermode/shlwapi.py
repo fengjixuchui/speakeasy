@@ -1,6 +1,10 @@
 # Copyright (C) 2020 FireEye, Inc. All Rights Reserved.
 
+import os
+import ntpath
+
 from .. import api
+import speakeasy.winenv.arch as e_arch
 
 
 class Shlwapi(api.ApiHandler):
@@ -24,6 +28,10 @@ class Shlwapi(api.ApiHandler):
         self.win = None
 
         super(Shlwapi, self).__get_hook_attrs__(self)
+
+    def join_windows_path(self, *args, **kwargs):
+        args = list(map(lambda x: x.replace('\\', '/'), args))
+        return os.path.join(*args, **kwargs).replace('/', '\\')
 
     @apihook('PathIsRelative', argc=1)
     def PathIsRelative(self, emu, argv, ctx={}):
@@ -97,6 +105,29 @@ class Shlwapi(api.ApiHandler):
         argv[0] = t[idx2:]
         return pszPath + idx1 + 1 + idx2
 
+    @apihook('StrCmpI', argc=2)
+    def StrCmpI(self, emu, argv, ctx={}):
+        """
+        int StrCmpI(
+        PCWSTR psz1,
+        PCWSTR psz2
+        );
+        """
+        psz1, psz2 = argv
+
+        cw = self.get_char_width(ctx)
+        s1 = self.read_mem_string(psz1, cw)
+        s2 = self.read_mem_string(psz2, cw)
+        rv = 1
+
+        argv[0] = s1
+        argv[1] = s2
+
+        if s1.lower() == s2.lower():
+            rv = 0
+
+        return rv
+
     @apihook('PathFindFileName', argc=1)
     def PathFindFileName(self, emu, argv, ctx={}):
         """
@@ -137,6 +168,23 @@ class Shlwapi(api.ApiHandler):
         self.write_mem_string(s, pszPath, cw)
         return pszPath
 
+    @apihook('PathStripPath', argc=1)
+    def PathStripPath(self, emu, argv, ctx={}):
+        """
+        void PathStripPath(
+        LPSTR pszPath
+        );
+        """
+        pszPath, = argv
+        cw = self.get_char_width(ctx)
+        s = self.read_mem_string(pszPath, cw)
+        argv[0] = s
+        mod_name = ntpath.basename(s) + '\x00'
+
+        enc = self.get_encoding(cw)
+        mod_name = mod_name.encode(enc)
+        self.mem_write(pszPath, mod_name)
+
     @apihook('wvnsprintfA', argc=4)
     def wvnsprintfA(self, emu, argv, ctx={}):
         """
@@ -164,3 +212,55 @@ class Shlwapi(api.ApiHandler):
         argv[1] = fmt_str
 
         return rv
+
+    @apihook('wnsprintf', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def wnsprintf(self, emu, argv, ctx={}):
+        """
+        int wnsprintfA(
+          PSTR  pszDest,
+          int   cchDest,
+          PCSTR pszFmt,
+          ...
+        );
+        """
+        argv = emu.get_func_argv(e_arch.CALL_CONV_CDECL, 3)
+        buf, max_buf_size, fmt = argv
+
+        cw = self.get_char_width(ctx)
+
+        fmt_str = self.read_mem_string(fmt, cw)
+        fmt_cnt = self.get_va_arg_count(fmt_str)
+        if not fmt_cnt:
+            self.write_mem_string(fmt_str, buf, cw)
+            return len(fmt_str)
+
+        _argv = emu.get_func_argv(e_arch.CALL_CONV_CDECL, 3 + fmt_cnt)[3:]
+        fin = self.do_str_format(fmt_str, _argv)
+        rv = len(fin)
+
+        if rv <= max_buf_size:
+            self.write_mem_string(fin, buf, cw)
+            argv[0] = fin
+            argv[2] = fmt_str
+            return rv
+        else:
+            return -1
+
+    @apihook('PathAppend', argc=2)
+    def PathAppend(self, emu, argv, ctx={}):
+        """
+        BOOL PathAppendA(
+          LPSTR  pszPath,
+          LPCSTR pszMore
+        );
+        """
+        pszPath, pszMore = argv
+        cw = self.get_char_width(ctx)
+        path = self.read_mem_string(pszPath, cw)
+        more = self.read_mem_string(pszMore, cw)
+        argv[0] = path
+        argv[1] = more
+        out = self.join_windows_path(path, more)
+        out += '\0'
+        self.write_mem_string(out, pszPath, cw)
+        return 1

@@ -60,18 +60,6 @@ class Win32Emulator(WindowsEmulator):
             out = shlex.split(self.command_line, posix=False)
         return out
 
-    def get_com_interface(self, name):
-        """
-        Retreive a COM interface by name
-        """
-        ci = self.com.get_interface(name, self.get_ptr_size())
-        if not ci:
-            raise Win32EmuError('Invalid COM interface: %s' % (name))
-
-        com_ptr = self.mem_map(self.sizeof(ci.iface), tag='emu.COM.%s' % (name))
-        ci.address = com_ptr
-        return ci
-
     def set_last_error(self, code):
         """
         Set the last error code for the current thread
@@ -227,7 +215,7 @@ class Win32Emulator(WindowsEmulator):
             self.stop()
             raise Win32EmuError('Module not found')
 
-        # Check is any TLS callbacks exist, these run before the module's entry point
+        # Check if any TLS callbacks exist, these run before the module's entry point
         tls = module.get_tls_callbacks()
         for i, cb_addr in enumerate(tls):
             base = module.get_base()
@@ -294,6 +282,7 @@ class Win32Emulator(WindowsEmulator):
             p = objman.Process(self, path=module.get_emu_path(), base=module.base,
                                pe=module, cmdline=self.command_line)
             self.curr_process = p
+            self.om.objects.update({p.address: p})
             mm = self.get_address_map(module.base)
             if mm:
                 mm.process = self.curr_process
@@ -558,11 +547,14 @@ class Win32Emulator(WindowsEmulator):
             if proc_mod:
                 all_user_mods = [proc_mod] + self.config_user_modules
                 user_modules = self.init_user_modules(all_user_mods)
-
             else:
                 user_modules = self.init_user_modules(self.config_user_modules)
 
             self.user_modules += user_modules
+            # add sample to user modules list if it is a dll
+            if self.modules and not self.modules[0][0].is_exe():
+                self.user_modules.append(self.modules[0][0])
+
         return self.user_modules
 
     def exit_process(self):

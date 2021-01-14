@@ -17,6 +17,7 @@ from speakeasy.windows.fileman import FileManager
 from speakeasy.windows.cryptman import CryptoManager
 from speakeasy.windows.netman import NetworkManager
 from speakeasy.windows.hammer import ApiHammer
+from speakeasy.windows.driveman import DriveManager
 
 import speakeasy.winenv.defs.nt.ddk as ddk
 import speakeasy.winenv.defs.windows.windows as windef
@@ -53,7 +54,7 @@ class WindowsEmulator(BinaryEmulator):
         self.page_size = 4096
         self.ptr_size = None
         self.user_modules = []
-        self.max_runs = 10
+        self.max_runs = 100
 
         self.sys_modules = []
         self.symbols = {}
@@ -99,6 +100,7 @@ class WindowsEmulator(BinaryEmulator):
         self.regman = RegistryManager(self.get_registry_config())
         self.fileman = FileManager(self.get_filesystem_config())
         self.netman = NetworkManager(config=self.get_network_config())
+        self.driveman = DriveManager(config=self.get_drive_config())
         self.cryptman = CryptoManager()
         self.hammer = ApiHammer(self)
 
@@ -132,6 +134,7 @@ class WindowsEmulator(BinaryEmulator):
         self.do_strings = self.config_analysis.get('strings', False)
         self.registry_config = self.config.get('registry', {})
         self.modules_always_exist = self.config_modules.get('modules_always_exist', False)
+        self.functions_always_exist = self.config_modules.get('functions_always_exist', False)
 
     def get_registry_config(self):
         """
@@ -223,6 +226,12 @@ class WindowsEmulator(BinaryEmulator):
         """
         return self.fileman.get_file_from_handle(handle)
 
+    def file_delete(self, path):
+        """
+        Delete a file
+        """
+        return self.fileman.delete_file(path)
+
     def pipe_get(self, handle):
         """
         Get a pipe object from a handle
@@ -247,6 +256,12 @@ class WindowsEmulator(BinaryEmulator):
         """
         return self.cryptman
 
+    def get_drive_manager(self):
+        """
+        Get the drive manager
+        """
+        return self.driveman
+
     def reg_open_key(self, path, create=False):
         """
         Open or create a registry key in the emulation space
@@ -266,6 +281,12 @@ class WindowsEmulator(BinaryEmulator):
         if path:
             return self.regman.get_key_from_path(path)
         return self.regman.get_key_from_handle(handle)
+
+    def reg_create_key(self, path):
+        """
+        Create a registry key
+        """
+        return self.regman.create_key(path)
 
     def _set_emu_hooks(self):
         """
@@ -374,6 +395,13 @@ class WindowsEmulator(BinaryEmulator):
             self.mem_map(self.page_size, base=0xFFFFF78000000000,
                          tag='emu.struct.KUSER_SHARED_DATA')
 
+    def resume(self, addr, count=-1):
+        """
+        Resume emulation at the specified address.
+        """
+        self.emu_eng.start(addr, timeout=self.timeout,
+                           count=count)
+
     def start(self):
         """
         Begin emulation executing each run in the specified run queue
@@ -462,7 +490,10 @@ class WindowsEmulator(BinaryEmulator):
         """
         Terminate a process (i.e. remove it from the known process list)
         """
-        self.processes.remove(proc)
+        try:
+            self.processes.remove(proc)
+        except ValueError:
+            pass
 
     def get_current_thread(self):
         """
@@ -963,7 +994,7 @@ class WindowsEmulator(BinaryEmulator):
         run = self.get_current_run()
         pc = self.get_pc()
         error = {}
-        self.log_error('%s: Caught error: %s' % (run.type, desc))
+        self.log_error('0x%x: %s: Caught error: %s' % (pc, run.type, desc))
         error['type'] = desc
         error['pc'] = hex(pc)
         error['address'] = hex(address)
@@ -1097,7 +1128,8 @@ class WindowsEmulator(BinaryEmulator):
                 try:
                     rv = self.api.call_api_func(mod, func, argv, ctx=default_ctx)
                 except Exception as e:
-                    self.log_exception('Error while calling API handler for %s:' % (imp_api))
+                    self.log_exception('0x%x: Error while calling API handler for %s:' %
+                                       (oret, imp_api))
                     error = self.get_error_info(str(e), self.get_pc(),
                                                 traceback=traceback.format_exc())
                     self.curr_run.error = error
@@ -1132,10 +1164,20 @@ class WindowsEmulator(BinaryEmulator):
                 self.log_api(ret, imp_api, rv, argv)
                 self.do_call_return(hook.argc, ret, rv, conv=hook.call_conv)
                 return
+            elif self.functions_always_exist:
+                imp_api = '%s.%s' % (dll, name)
+                conv = _arch.CALL_CONV_STDCALL
+                argc = 4
+                argv = self.get_func_argv(conv, argc)
+                rv = 1
+                ret = self.get_ret_address()
+                self.log_api(ret, imp_api, rv, argv)
+                self.do_call_return(argc, ret, rv, conv=conv)
+                return
 
             run = self.get_current_run()
             error = self.get_error_info('unsupported_api', self.get_pc())
-            self.log_error("Unsupported API: %s" % (imp_api))
+            self.log_error("Unsupported API: %s (ret: 0x%x)" % (imp_api, oret))
             error['api_name'] = imp_api
             self.curr_run.error = error
             self.on_run_complete()
@@ -1412,6 +1454,7 @@ class WindowsEmulator(BinaryEmulator):
         Hook called before every emulated instruction. Ideally we want to
         stay out of this hook as much as possible for speed considerations.
         """
+
         if self.debug:
             x = self.get_disasm(addr, size)[2]
             print('0x%x: %s, edi=0x%x : esi=0x%x : ebp=0x%x : eax=0x%x' % (addr, x, self.reg_read('edi'), self.reg_read('esi'), self.reg_read('ebp'), self.reg_read('eax'))) # noqa
@@ -1455,7 +1498,8 @@ class WindowsEmulator(BinaryEmulator):
 
             if not self.mem_tracing_enabled:
                 # Disabling the code hook here grants a significant speed bump
-                self.disable_code_hook()
+                if not self.debug:
+                    self.disable_code_hook()
 
             if self.max_instructions != -1 and self.curr_run.instr_cnt >= self.max_instructions:
                 self.on_run_complete()
@@ -1546,12 +1590,12 @@ class WindowsEmulator(BinaryEmulator):
         Load a new module into the emulation space if necessary
         """
         ums = self.get_user_modules()
-        lib = os.path.splitext(mod_name)[0]
+        lib = ntpath.basename(mod_name)
+        lib = os.path.splitext(lib)[0]
 
         for um in ums:
             base = ntpath.basename(um.get_emu_path())
             base = os.path.splitext(base)[0]
-
             if lib.lower() == base.lower():
                 hmod = um.get_base()
                 return hmod
@@ -1567,7 +1611,8 @@ class WindowsEmulator(BinaryEmulator):
 
         # Add the newly loaded module to the current process's PEB module list
         proc = self.get_current_process()
-        proc.add_module_to_peb(mod)
+        if self.get_address_map(proc.get_peb_ldr().address):
+            proc.add_module_to_peb(mod)
 
         return mod.get_base()
 
@@ -1586,6 +1631,7 @@ class WindowsEmulator(BinaryEmulator):
             jit = winemu.JitPeFile(self.get_arch())
 
             funcs = [(f[4], f[0]) for k, f in mod_handler.funcs.items() if isinstance(k, str)]
+            data_exports = [k for k, d in mod_handler.data.items() if isinstance(k, str)]
 
             new = funcs.copy()
 
@@ -1608,6 +1654,7 @@ class WindowsEmulator(BinaryEmulator):
             func_names = new
 
             func_names = [fn for o, fn in func_names]
+            func_names.sort()
 
             exports = []
             ords = [o for o, fn in funcs if o is not None]
@@ -1628,6 +1675,7 @@ class WindowsEmulator(BinaryEmulator):
             if not exports:
                 exports = func_names
 
+            exports += data_exports
             img = jit.get_decoy_pe_image(modname, exports)
             mod = winemu.DecoyModule(data=img)
 
@@ -1664,7 +1712,7 @@ class WindowsEmulator(BinaryEmulator):
         if isinstance(base, str):
             base = int(base, 16)
 
-        mod.decoy_path = modconf.get('path', emu_path)
+        mod.decoy_path = modconf.get('path', emu_path) or (name + '.dll')
         # Reserve memory for the module
         res, size = self.get_valid_ranges(mod.image_size,
                                           base)
@@ -1672,6 +1720,9 @@ class WindowsEmulator(BinaryEmulator):
         mod.name = modconf.get('name', name)
         self.mem_reserve(size, base=res, tag='emu.module.%s' % (mod.name),
                          perms=common.PERM_MEM_RW)
+
+        if mod.decoy_path == '' and name != '':
+            mod.decoy_path = self.config.get('current_dir', 'C:\\Windows\\system32') + '\\' + name
 
         mod.base_name = ntpath.basename(mod.decoy_path)
 
@@ -1879,6 +1930,12 @@ class WindowsEmulator(BinaryEmulator):
             return True
         return False
 
+    def get_reserved_ranges(self):
+        """
+        Get the allocated memory ranges that the emulator reserves
+        """
+        return (winemu.EMU_RESERVED, winemu.EMU_RESERVED_END)
+
     def _continue_seh_x86(self):
         """
         Get the next exception handler while processing SEH
@@ -1990,6 +2047,8 @@ class WindowsEmulator(BinaryEmulator):
         """
         Create a kernel mutant object
         """
+        if name == 0:
+            name = ''
         mtx = self.new_object(objman.Mutant)
         mtx.name = name
         hnd = self.om.get_handle(mtx)
@@ -2008,7 +2067,7 @@ class WindowsEmulator(BinaryEmulator):
         exception_list = self._get_exception_list()
         if exception_list and self.dispatch_handlers:
             # Catch software breakpoint interrupts
-            if intnum == 3:
+            if intnum == 3 or intnum == 0x2d:
                 self.curr_exception_code = ddk.STATUS_BREAKPOINT
                 self.prev_pc = self.get_pc()
                 self.enable_code_hook()

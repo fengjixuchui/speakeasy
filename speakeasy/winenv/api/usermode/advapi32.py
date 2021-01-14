@@ -229,8 +229,30 @@ class AdvApi32(api.ApiHandler):
 
         hKey, dwIndex, lpName, cchName = argv
 
-        cw = self.get_char_width(ctx)
+        _argv = argv + [0, 0, 0, 0]
+        rv = self.RegEnumKeyEx(emu, _argv, ctx)
+        argv[:] = _argv[: 4]
 
+        return rv
+
+    @apihook('RegEnumKeyEx', argc=8, conv=_arch.CALL_CONV_STDCALL)
+    def RegEnumKeyEx(self, emu, argv, ctx={}):
+        '''
+        LSTATUS RegEnumKeyEx(
+            HKEY      hKey,
+            DWORD     dwIndex,
+            LPSTR     lpName,
+            LPDWORD   lpcchName,
+            LPDWORD   lpReserved,
+            LPSTR     lpClass,
+            LPDWORD   lpcchClass,
+            PFILETIME lpftLastWriteTime
+        );
+        '''
+
+        hKey, dwIndex, lpName, cchName, res, pcls, cchcls, last_write = argv
+
+        cw = self.get_char_width(ctx)
         rv = windefs.ERROR_INVALID_HANDLE
         if hKey:
             key = self.reg_get_key(hKey)
@@ -252,6 +274,34 @@ class AdvApi32(api.ApiHandler):
                         self.mem_write(lpName, name)
                         rv = windefs.ERROR_SUCCESS
 
+        return rv
+
+    @apihook('RegCreateKey', argc=3)
+    def RegCreateKey(self, emu, argv, ctx={}):
+        """
+        LSTATUS RegCreateKey(
+            HKEY    hKey,
+            LPCWSTR lpSubKey,
+            PHKEY   phkResult
+        );
+        """
+        hkey, lpSubKey, phkResult = argv
+        rv = windefs.ERROR_INVALID_HANDLE
+        if hkey:
+            key = self.reg_get_key(hkey)
+            argv[0] = key.get_path()
+            if not key:
+                rv = windefs.ERROR_INVALID_HANDLE
+            else:
+                cw = self.get_char_width(ctx)
+                if lpSubKey:
+                    lpSubKey = self.read_mem_string(lpSubKey, cw)
+                    argv[1] = lpSubKey
+                    self.emu.reg_create_key(key.get_path() + '\\' + lpSubKey)
+                else:
+                    hkey = (hkey).to_bytes(self.get_ptr_size(), 'little')
+                    self.mem_write(phkResult, hkey)
+                    rv = windefs.ERROR_SUCCESS
         return rv
 
     @apihook('RegQueryInfoKey', argc=12, conv=_arch.CALL_CONV_STDCALL)
@@ -482,6 +532,22 @@ class AdvApi32(api.ApiHandler):
 
         return 0x1
 
+    @apihook('RevertToSelf', argc=0)
+    def RevertToSelf(self, emu, argv, ctx={}):
+        '''
+        BOOL RevertToSelf();
+        '''
+        return 1
+
+    @apihook('ImpersonateLoggedOnUser', argc=1)
+    def ImpersonateLoggedOnUser(self, emu, argv, ctx={}):
+        '''
+        BOOL ImpersonateLoggedOnUser(
+        HANDLE hToken
+        );
+        '''
+        return 1
+
     @apihook('OpenSCManager', argc=3)
     def OpenSCManager(self, emu, argv, ctx={}):
         '''
@@ -590,6 +656,24 @@ class AdvApi32(api.ApiHandler):
 
         return rv
 
+    @apihook('SystemFunction036', argc=2)
+    def RtlGenRandom(self, emu, argv, ctx={}):
+        '''
+        BOOLEAN RtlGenRandom(
+            PVOID RandomBuffer,
+            ULONG RandomBufferLength
+        );
+        '''
+        RandomBuffer, RandomBufferLength = argv
+
+        rv = False
+        if RandomBuffer and RandomBufferLength:
+            buf = bytes([i for i in range(RandomBufferLength)])
+            self.mem_write(RandomBuffer, buf)
+            rv = True
+
+        return rv
+
     @apihook('CryptAcquireContext', argc=5)
     def CryptAcquireContext(self, emu, argv, ctx={}):
         '''
@@ -614,7 +698,7 @@ class AdvApi32(api.ApiHandler):
             argv[2] = prov_str
 
         cm = emu.get_crypt_manager()
-        hnd = cm.crypt_open(cont_str, prov_str, dwProvType, dwFlags)
+        hnd = cm.crypt_open(cname=cont_str, pname=prov_str, ptype=dwProvType, flags=dwFlags)
 
         if hnd and phProv:
             self.mem_write(phProv, hnd.to_bytes(emu.get_ptr_size(), 'little'))
@@ -731,6 +815,7 @@ class AdvApi32(api.ApiHandler):
 
         user = emu.get_user()
         user_name = user.get('name')
+        argv[0] = user_name
 
         if lpBuffer:
             if cw == 2:
@@ -990,8 +1075,8 @@ class AdvApi32(api.ApiHandler):
         hnd.update(data)
         return 1
 
-    @apihook('RegGetValueW', argc=7, conv=_arch.CALL_CONV_STDCALL)
-    def RegGetValueW(self, emu, argv, ctx={}):
+    @apihook('RegGetValue', argc=7, conv=_arch.CALL_CONV_STDCALL)
+    def RegGetValue(self, emu, argv, ctx={}):
         '''
         LSTATUS RegGetValueW(
             HKEY    hkey,
@@ -1050,3 +1135,31 @@ class AdvApi32(api.ApiHandler):
                                      buffer=lpData)
 
         return rv
+
+    @apihook('EnumServicesStatus', argc=8, conv=_arch.CALL_CONV_STDCALL)
+    def EnumServicesStatus(self, emu, argv, ctx={}):
+        '''
+        BOOL EnumServicesStatusA(
+          SC_HANDLE              hSCManager,
+          DWORD                  dwServiceType,
+          DWORD                  dwServiceState,
+          LPENUM_SERVICE_STATUSA lpServices,
+          DWORD                  cbBufSize,
+          LPDWORD                pcbBytesNeeded,
+          LPDWORD                lpServicesReturned,
+          LPDWORD                lpResumeHandle
+        );
+        '''
+        hSCManager, dwServiceType, dwServiceState, lpServices, cbBufSize, \
+            pcbBytesNeeded, lpServicesReturned, lpResumeHandle = argv
+
+        service_type_str = adv32.get_define_int(dwServiceType, 'SERVICE_')
+        if service_type_str:
+            argv[1] = service_type_str
+
+        service_state_str = adv32.get_define_int(dwServiceState, 'SERVICE_')
+        if service_state_str:
+            argv[2] = service_state_str
+
+        # TODO: Populate service status output
+        return 1

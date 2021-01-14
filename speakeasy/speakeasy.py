@@ -53,6 +53,12 @@ class Speakeasy(object):
         self.mem_invalid_hooks = []
         self.interrupt_hooks = []
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        del self
+
     def _init_config(self, config: dict) -> None:
         """
         Init the emulator config
@@ -137,7 +143,7 @@ class Speakeasy(object):
             cb, ctx = h
             self.add_interrupt_hook(cb, ctx)
 
-    def disasm(self, addr: int, size: int):
+    def disasm(self, addr: int, size: int, fast=True):
         """
         Get the disassembly from an address
 
@@ -147,7 +153,7 @@ class Speakeasy(object):
         return:
             A tuple of: (mnemonic, operands, and the full instruction)
         """
-        return self.emu.get_disasm(addr, size)
+        return self.emu.get_disasm(addr, size, fast)
 
     def is_pe(self, data: bytes) -> bool:
         """
@@ -259,7 +265,8 @@ class Speakeasy(object):
         """
         return self.emu.get_json_report()
 
-    def add_api_hook(self, cb: Callable, module='', api_name='', argc=0, call_conv=None):
+    def add_api_hook(self, cb: Callable, module='', api_name='', argc=0, call_conv=None,
+                     enable_wild_cards=True):
         """
         Set a callback to fire when a specified API is called during emulation
 
@@ -268,7 +275,8 @@ class Speakeasy(object):
             module: name of the module containing the target API
             api_name: Name of the API to hook. Wild cards (e.g. *) are supported.
             argc: force the emulator to account for this amount of arguments (for stack cleanup)
-            call_conv: force the emulator to use the suppolied calling convention for this hook
+            call_conv: force the emulator to use the supplied calling convention for this hook
+            enable_wild_cards: enable wild cards for this hook
         return:
             Hook object for newly registered hooks
         """
@@ -276,7 +284,21 @@ class Speakeasy(object):
             self.api_hooks.append((cb, module, api_name, argc, call_conv))
             return
         return self.emu.add_api_hook(cb, module=module, api_name=api_name, argc=argc,
-                                     call_conv=call_conv, emu=self)
+                                     call_conv=call_conv, emu=self,
+                                     enable_wild_cards=enable_wild_cards)
+
+    def resume(self, addr, count=-1):
+        """
+        Resume emulating at the specified address
+
+        args:
+            addr: Address to being emulation at
+            count: number of instructions
+        return:
+            None
+        """
+        self.emu.run_complete = False
+        self.emu.resume(addr, count=count)
 
     def stop(self) -> None:
         """
@@ -396,6 +418,24 @@ class Speakeasy(object):
             A memory map object that holds the specified address
         """
         return self.emu.get_address_map(addr)
+
+    def get_user_modules(self) -> list:
+        """
+        Get the address ranges of loaded user modules
+
+        return:
+            List of all currently loaded user modules
+        """
+        return self.emu.get_user_modules()
+
+    def get_sys_modules(self) -> list:
+        """
+        Get the address ranges of loaded system modules
+
+        return:
+            List of all currently loaded system modules
+        """
+        return self.emu.get_sys_modules()
 
     def mem_alloc(self, size, base=None, tag='speakeasy.None') -> int:
         """
@@ -558,6 +598,160 @@ class Speakeasy(object):
             except Exception:
                 continue
             yield (tag, base, size, is_free, proc, data)
+
+    def read_mem_string(self, address: int, width=1, max_chars=0) -> str:
+        """
+        Read a string from emulated memory
+
+        args:
+            address: address of the string to read
+            width: character width
+            max_chars: maximum characters to read, 0 reads until null terminator
+
+        return:
+            decoded string
+        """
+        return self.emu.read_mem_string(address, width, max_chars)
+
+    def get_symbols(self) -> dict:
+        """
+        Returns a dictionary of symbol information
+
+        return:
+            a dictionary of symbol information
+        """
+        return self.emu.symbols
+
+    def get_ret_address(self) -> int:
+        """
+        Returns the value stored at the top of the stack
+
+        return:
+            value stored at the top of the stack
+        """
+        return self.emu.get_ret_address()
+
+    def push_stack(self, val: int) -> None:
+        """
+        Put a value on the stack and adjust the stack pointer
+
+        args:
+            val: value to push to the stack
+        return:
+            None
+        """
+        self.emu.push_stack(val)
+
+    def pop_stack(self) -> int:
+        """
+        Get value from the stack and adjust the stack pointer
+
+        return:
+            value stored at the top of the stack
+        """
+        return self.emu.pop_stack()
+
+    def get_stack_ptr(self) -> int:
+        """
+        Get the current address of the stack pointer
+
+        return:
+            address of stack pointer
+        """
+        return self.emu.get_stack_ptr()
+
+    def set_stack_ptr(self, addr: int) -> None:
+        """
+        Set the current address of the stack pointer
+
+        args:
+            addr: address to set the stack pointer to
+        return:
+            None
+        """
+        self.emu.set_stack_ptr(addr)
+
+    def set_pc(self, addr: int) -> None:
+        """
+        Set the value of the current program counter
+
+        args:
+            addr: address to set the program counter to
+        return:
+            None
+        """
+        self.emu.set_pc(addr)
+
+    def reset_stack(self, base: int) -> tuple:
+        """
+        Reset stack to the supplied base address
+
+        args:
+            base: stack base address
+        return:
+            base, ptr
+        """
+        return self.emu.reset_stack(base)
+
+    def get_stack_base(self) -> int:
+        """
+        Get the base address of the stack
+
+        return:
+            base address of stack
+        """
+        return self.emu.stack_base
+
+    def get_arch(self) -> int:
+        """
+        Get the architecture of the emulator
+
+        return:
+            emulator architecture constant value
+        """
+        return self.emu.get_arch()
+
+    def get_ptr_size(self) -> int:
+        """
+        Get the size of a pointer
+
+        return:
+            pointer size
+        """
+        return self.emu.ptr_size
+
+    def get_all_registers(self) -> dict:
+        """
+        Get the state of all registers
+
+        return:
+            Dict containing emulation register states
+        """
+        return self.emu.get_register_state()
+
+    def get_symbol_from_address(self, address: int) -> str:
+        """
+        If the supplied address is related to a known symbol, look it up here
+
+        args:
+            address: address to lookup
+
+        return:
+            symbol name
+        """
+        return self.emu.get_symbol_from_address(address)
+
+    def is_address_valid(self, address: int) -> bool:
+        """
+        Was this address previously reserved or mapped?
+
+        args:
+            address: address to check
+
+        return:
+            True if address is valid, false otherwise
+        """
+        return self.emu.is_address_valid(address)
 
     def create_memdump_archive(self) -> bytes:
         """

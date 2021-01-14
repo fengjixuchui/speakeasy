@@ -18,6 +18,7 @@ WH_MOUSE_LL = 14
 WH_MSGFILTER = -1
 WH_SHELL = 10
 WH_SYSMSGFILTER = 6
+WM_TIMER = 0x0113
 
 WM_PAINT = 0x0F
 
@@ -35,6 +36,14 @@ class MSG(EmuStruct):
         self.pt_x = Ptr
         self.pt_y = Ptr
         self.lPrivate = ct.c_uint32
+
+
+class USEROBJECTFLAGS(EmuStruct):
+    def __init__(self, ptr_size):
+        super().__init__(ptr_size)
+        self.fInherit = ct.c_uint32
+        self.fReserved = ct.c_uint32
+        self.dwFlags = ct.c_uint32
 
 
 class WNDCLASSEX(EmuStruct):

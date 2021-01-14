@@ -10,6 +10,7 @@ ERROR_FILE_NOT_FOUND = 2
 ERROR_PATH_NOT_FOUND = 3
 ERROR_ACCESS_DENIED = 5
 ERROR_INVALID_HANDLE = 6
+ERROR_NO_MORE_FILES = 18
 ERROR_FILE_EXISTS = 80
 ERROR_INVALID_PARAMETER = 87
 ERROR_INSUFFICIENT_BUFFER = 122
@@ -74,6 +75,15 @@ CREATE_SEPARATE_WOW_VDM = 0x00000800
 CREATE_SHARED_WOW_VDM = 0x00001000
 CREATE_SUSPENDED = 0x00000004
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
+
+
+class GUID(EmuStruct):
+    def __init__(self):
+        super().__init__()
+        self.Data1 = ct.c_uint32
+        self.Data2 = ct.c_uint16
+        self.Data3 = ct.c_uint16
+        self.Data4 = ct.c_uint8 * 8
 
 
 class KSYSTEM_TIME(EmuStruct):

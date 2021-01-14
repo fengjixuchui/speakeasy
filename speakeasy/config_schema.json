@@ -101,6 +101,10 @@
             ],
             "description": "emulation engine to use"
         },
+        "max_instructions": {
+            "type": "number",
+            "description": "max instructions to emulate"
+        },
         "timeout": {
             "type": "number",
             "description": "emulation timeout"
@@ -191,6 +195,10 @@
                 "type": "string"
             }
         },
+        "domain": {
+            "type": "string",
+            "description": "Domain returned during emulation"
+        },
         "hostname": {
             "type": "string",
             "description": "Hostname returned during emulation"
@@ -222,6 +230,13 @@
                 "threshold": {
                     "type": "number",
                     "description": "Threshold for an individual API call to trigger API hammer mitigation"
+                },
+                "allow_list": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of allowed APIs (of the form '<dll_name>.<function_name>') to always allow despite API hammering mitigation being used"
                 }
             },
             "additionalProperties": false,
@@ -250,6 +265,27 @@
                     "name",
                     "target"
                 ]
+            }
+        },
+        "drives": {
+            "type": "array",
+            "description": "Lists attached drives and their type",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "root_path": {
+                        "type": "string",
+                        "description": "The root path of the drive"
+                    },
+                    "drive_type": {
+                        "type": "string",
+                        "description": "The drive type (e.g., DRIVE_FIXED)"
+                    },
+                    "volume_guid_path": {
+                        "type": "string",
+                        "description": "Assuming each drive only has a single volume, this is the volume GUID"
+                    }
+                }
             }
         },
         "filesystem": {
@@ -442,6 +478,10 @@
                 "modules_always_exist": {
                     "type": "boolean",
                     "description": "When a sample attempts to load a module, always present a decoy module"
+                },
+                "functions_always_exist": {
+                    "type": "boolean",
+                    "description": "When a sample attempts to call a non-implemented API, always present a fake return value"
                 },
                 "user_modules": {
                     "type": "array",
